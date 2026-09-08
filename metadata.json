@@ -1,0 +1,8 @@
+{
+  "uuid": "statusmonitorgnome@yenreh.github.com",
+  "name": "StatusMonitorGnome",
+  "description": "Show CPU, memory and GPU usage, temperature and power draw in the GNOME top bar.",
+  "shell-version": ["45", "46", "47", "48"],
+  "settings-schema": "org.gnome.shell.extensions.statusmonitorgnome",
+  "version-name": "1.0.0"
+}

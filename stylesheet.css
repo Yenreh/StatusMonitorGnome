@@ -1,0 +1,65 @@
+/* Panel */
+
+.sm-chip {
+    margin: 0 2px;
+    spacing: 4px;
+}
+
+.sm-chip-icon {
+    margin-right: 1px;
+}
+
+.sm-section-icon {
+    margin-right: 8px;
+    opacity: 0.7;
+}
+
+.sm-chip-prefix {
+    font-size: 0.8em;
+    font-weight: bold;
+    opacity: 0.55;
+}
+
+.sm-chip-value {
+    font-feature-settings: "tnum";
+    font-size: 0.9em;
+}
+
+/* Menu */
+
+.sm-row {
+    min-width: 300px;
+    spacing: 10px;
+}
+
+.sm-row-title {
+    opacity: 0.7;
+}
+
+.sm-row-value {
+    font-feature-settings: "tnum";
+    min-width: 130px;
+    text-align: right;
+}
+
+/* Track width must match BAR_WIDTH in extension.js. */
+.sm-bar {
+    width: 90px;
+    height: 6px;
+    border-radius: 99px;
+    background-color: rgba(255, 255, 255, 0.15);
+}
+
+.sm-bar-fill {
+    height: 6px;
+    border-radius: 99px;
+    background-color: #3584e4;
+}
+
+.sm-bar-warn {
+    background-color: #f5c211;
+}
+
+.sm-bar-crit {
+    background-color: #e01b24;
+}

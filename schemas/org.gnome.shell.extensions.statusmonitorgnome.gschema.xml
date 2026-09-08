@@ -1,0 +1,91 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<schemalist>
+  <schema id="org.gnome.shell.extensions.statusmonitorgnome"
+          path="/org/gnome/shell/extensions/statusmonitorgnome/">
+
+    <key name="refresh-interval" type="i">
+      <range min="1" max="60"/>
+      <default>2</default>
+      <summary>Refresh interval</summary>
+      <description>Seconds between sensor readings.</description>
+    </key>
+
+    <key name="show-cpu-usage" type="b">
+      <default>true</default>
+      <summary>Show CPU usage</summary>
+      <description>Show the CPU usage percentage in the panel.</description>
+    </key>
+
+    <key name="show-cpu-temp" type="b">
+      <default>true</default>
+      <summary>Show CPU temperature</summary>
+      <description>Show the CPU package temperature in the panel.</description>
+    </key>
+
+    <key name="show-cpu-power" type="b">
+      <default>true</default>
+      <summary>Show CPU power</summary>
+      <description>Show the CPU package power draw in the panel. Needs read access to the RAPL energy counter.</description>
+    </key>
+
+    <key name="show-memory-usage" type="b">
+      <default>true</default>
+      <summary>Show memory usage</summary>
+      <description>Show the used memory percentage in the panel.</description>
+    </key>
+
+    <key name="show-disk-usage" type="b">
+      <default>true</default>
+      <summary>Show disk usage</summary>
+      <description>Show the used space percentage of the monitored mount point in the panel.</description>
+    </key>
+
+    <key name="show-disk-temp" type="b">
+      <default>true</default>
+      <summary>Show disk temperature</summary>
+      <description>Show the temperature of the hottest drive in the panel.</description>
+    </key>
+
+    <key name="show-disk-io" type="b">
+      <default>false</default>
+      <summary>Show disk activity</summary>
+      <description>Show the combined read and write throughput in the panel.</description>
+    </key>
+
+    <key name="disk-mount" type="s">
+      <default>"/"</default>
+      <summary>Monitored mount point</summary>
+      <description>Filesystem whose used space is reported, for example / or /home.</description>
+    </key>
+
+    <key name="show-gpu-usage" type="b">
+      <default>true</default>
+      <summary>Show GPU usage</summary>
+      <description>Show the GPU usage percentage in the panel.</description>
+    </key>
+
+    <key name="show-gpu-temp" type="b">
+      <default>true</default>
+      <summary>Show GPU temperature</summary>
+      <description>Show the GPU temperature in the panel.</description>
+    </key>
+
+    <key name="show-gpu-power" type="b">
+      <default>true</default>
+      <summary>Show GPU power</summary>
+      <description>Show the GPU power draw in the panel.</description>
+    </key>
+
+    <key name="prefix-style" type="s">
+      <choices>
+        <choice value="icon"/>
+        <choice value="text"/>
+        <choice value="none"/>
+      </choices>
+      <default>"icon"</default>
+      <summary>Device marker</summary>
+      <description>What identifies each group of panel values: the device icon, a text prefix such as CPU or RAM, or nothing.</description>
+    </key>
+
+  </schema>
+</schemalist>
