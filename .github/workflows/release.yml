@@ -1,0 +1,76 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libglib2.0-bin zip
+
+      - name: Read metadata.json
+        id: meta
+        run: |
+          echo "uuid=$(python3 -c "import json;print(json.load(open('metadata.json'))['uuid'])")" >> "$GITHUB_OUTPUT"
+          echo "name=$(python3 -c "import json;print(json.load(open('metadata.json'))['name'])")" >> "$GITHUB_OUTPUT"
+          echo "version=$(python3 -c "import json;print(json.load(open('metadata.json'))['version-name'])")" >> "$GITHUB_OUTPUT"
+
+      - name: Check the tag matches metadata.json
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          tag="${GITHUB_REF_NAME#v}"
+          if [ "$tag" != "${{ steps.meta.outputs.version }}" ]; then
+            echo "Tag $GITHUB_REF_NAME does not match version-name ${{ steps.meta.outputs.version }}" >&2
+            exit 1
+          fi
+
+      - name: Check JavaScript syntax
+        run: |
+          # The sources are ES modules, which node only parses as such under .mjs.
+          for f in extension.js prefs.js; do
+            cp "$f" "${f%.js}.mjs"
+            node --check "${f%.js}.mjs"
+            rm "${f%.js}.mjs"
+          done
+
+      - name: Build the extension zip
+        run: |
+          glib-compile-schemas schemas
+          zip -r "${{ steps.meta.outputs.uuid }}.shell-extension.zip" metadata.json extension.js prefs.js stylesheet.css schemas icons
+
+      - name: Upload the zip as a build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.meta.outputs.uuid }}
+          path: ${{ steps.meta.outputs.uuid }}.shell-extension.zip
+
+      - name: Publish the release
+        if: startsWith(github.ref, 'refs/tags/')
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          printf '%s\n' \
+            "Download the zip below and install it with:" \
+            "" \
+            "    gnome-extensions install --force ${{ steps.meta.outputs.uuid }}.shell-extension.zip" \
+            "" \
+            "Then log out and log back in, GNOME Shell cannot be restarted on Wayland, and enable it:" \
+            "" \
+            "    gnome-extensions enable ${{ steps.meta.outputs.uuid }}" \
+            > notes.md
+          gh release create "$GITHUB_REF_NAME" \
+            "${{ steps.meta.outputs.uuid }}.shell-extension.zip" \
+            --title "${{ steps.meta.outputs.name }} ${{ steps.meta.outputs.version }}" \
+            --notes-file notes.md
