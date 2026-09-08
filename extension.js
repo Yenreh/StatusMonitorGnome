@@ -25,7 +25,39 @@ const GIB = 1024 * 1024 * 1024;
 const RAPL_RETRY = 15;
 
 // Block devices, without their partitions, as named in /proc/diskstats.
-const DISK_DEVICE = /^(nvme\d+n\d+|sd[a-z]+|vd[a-z]+|mmcblk\d+)$/;
+const DISK_DEVICE = /^(nvme\d+n\d+|sd[a-z]+|vd[a-z]+|xvd[a-z]+|hd[a-z]+|mmcblk\d+)$/;
+
+// Top level powercap zones, such as intel-rapl:0. The finer domains below
+// them, intel-rapl:0:0, are excluded so their watts are not counted twice.
+const POWERCAP_ZONE = /^[\w.-]+:\d+$/;
+
+// hwmon chips reporting a CPU package temperature, in preference order.
+const CPU_TEMP_CHIPS = [
+    'coretemp',
+    'k10temp',
+    'zenpower',
+    'k8temp',
+    'via_cputemp',
+    'cpu_thermal',
+    'soc_thermal',
+    'acpitz',
+];
+
+// Thermal zone types that stand for the CPU, used when no hwmon chip matches.
+const CPU_THERMAL_ZONE = /^(x86_pkg_temp|cpu[-_]?thermal|soc[-_]?thermal|cpu\d*)$/i;
+
+// PCI vendors of graphics cards, to name a card when the id database is absent.
+const PCI_VENDORS = new Map([
+    ['1002', 'AMD'],
+    ['1022', 'AMD'],
+    ['10de', 'NVIDIA'],
+    ['8086', 'Intel'],
+    ['1af4', 'Virtio'],
+    ['15ad', 'VMware'],
+]);
+
+// Where distributions ship the PCI id database that names a card.
+const PCI_IDS_PATHS = ['/usr/share/hwdata/pci.ids', '/usr/share/misc/pci.ids'];
 
 // Fields asked to nvidia-smi, in the order they are parsed.
 const NVIDIA_QUERY = [
@@ -94,6 +126,68 @@ function runCommand(argv) {
     });
 }
 
+// Every hwmon chip as {name, dir}. One pass, since several monitors look for
+// their own chip in the same list.
+function hwmonChips() {
+    const chips = [];
+    for (const entry of listDir('/sys/class/hwmon')) {
+        const dir = `/sys/class/hwmon/${entry}`;
+        const name = readFile(`${dir}/name`)?.trim();
+        if (name)
+            chips.push({name, dir});
+    }
+    return chips;
+}
+
+// Temperature input of a chip, preferring the one labelled as the package.
+function chipTempPath(dir, labelled = /package|tctl|tdie/i) {
+    const inputs = listDir(dir).filter(f => /^temp\d+_input$/.test(f)).sort();
+    for (const input of inputs) {
+        const label = readFile(`${dir}/${input.replace('_input', '_label')}`)?.trim() ?? '';
+        if (labelled.test(label))
+            return `${dir}/${input}`;
+    }
+    return null;
+}
+
+// Model name of a PCI device from the system id database, so a card read from
+// sysfs gets the same kind of title nvidia-smi returns. Cards are enumerated
+// once, and the answer is cached, so the database is parsed at most once.
+const pciNameCache = new Map();
+
+function pciDeviceName(vendorId, deviceId) {
+    if (!vendorId || !deviceId)
+        return null;
+
+    const key = `${vendorId}:${deviceId}`;
+    if (pciNameCache.has(key))
+        return pciNameCache.get(key);
+
+    const text = PCI_IDS_PATHS.map(readFile).find(value => value !== null) ?? '';
+    let name = null;
+    let inVendor = false;
+    for (const line of text.split('\n')) {
+        if (line.startsWith('#'))
+            continue;
+
+        if (!line.startsWith('\t')) {
+            // The vendor block is over, the device is not listed.
+            if (inVendor)
+                break;
+            inVendor = new RegExp(`^${vendorId}\\s`).test(line);
+        } else if (inVendor && !line.startsWith('\t\t')) {
+            const match = /^\t([0-9a-f]{4})\s+(.+)$/.exec(line);
+            if (match && match[1] === deviceId) {
+                name = match[2].trim();
+                break;
+            }
+        }
+    }
+
+    pciNameCache.set(key, name);
+    return name;
+}
+
 // Icons ship with the extension: the theme has no CPU or memory icon. The
 // -symbolic.svg suffix is what makes them follow the panel foreground color.
 function deviceIcon(extension, name) {
@@ -151,7 +245,9 @@ class CpuMonitor {
         this._prevTimes = null;
         this._prevEnergy = null;
         this._lastProbe = 0;
-        this._tempPath = this._findTempPath();
+        const chips = hwmonChips();
+        this._tempPath = this._findTempPath(chips);
+        this._powerPath = this._findPowerPath(chips);
         this._energyPaths = this._findEnergyPaths();
         this._freqPaths = this._findFreqPaths();
         this.model = this._findModel();
@@ -171,63 +267,110 @@ class CpuMonitor {
         return match ? match[1].trim() : _('Processor');
     }
 
-    // Package temperature of the first known CPU chip, in preference order.
-    _findTempPath() {
-        const chips = new Map();
-        for (const entry of listDir('/sys/class/hwmon')) {
-            const dir = `/sys/class/hwmon/${entry}`;
-            const name = readFile(`${dir}/name`)?.trim();
-            if (name && !chips.has(name))
-                chips.set(name, dir);
-        }
-
-        for (const chip of ['coretemp', 'k10temp', 'zenpower', 'cpu_thermal', 'acpitz']) {
-            const dir = chips.get(chip);
+    // A known CPU chip first, then any chip labelling a package sensor, then
+    // the kernel thermal zones, which is what ARM boards and virtual machines
+    // usually expose. Nothing here is specific to one vendor.
+    _findTempPath(chips) {
+        for (const chip of CPU_TEMP_CHIPS) {
+            const dir = chips.find(entry => entry.name === chip)?.dir;
             if (!dir)
                 continue;
 
+            const labelled = chipTempPath(dir);
+            if (labelled)
+                return labelled;
+
             const inputs = listDir(dir).filter(f => /^temp\d+_input$/.test(f)).sort();
-            for (const input of inputs) {
-                const label = readFile(`${dir}/${input.replace('_input', '_label')}`)?.trim() ?? '';
-                if (/package|tctl|tdie/i.test(label))
-                    return `${dir}/${input}`;
-            }
             if (inputs.length > 0)
                 return `${dir}/${inputs[0]}`;
+        }
+
+        // Unknown chip, an embedded controller for example: a package or Tctl
+        // label still identifies the sensor without guessing.
+        for (const {dir} of chips) {
+            const path = chipTempPath(dir);
+            if (path)
+                return path;
+        }
+
+        for (const entry of listDir('/sys/class/thermal').sort()) {
+            if (!/^thermal_zone\d+$/.test(entry))
+                continue;
+
+            const dir = `/sys/class/thermal/${entry}`;
+            const type = readFile(`${dir}/type`)?.trim() ?? '';
+            if (CPU_THERMAL_ZONE.test(type) && readNumber(`${dir}/temp`) !== null)
+                return `${dir}/temp`;
         }
         return null;
     }
 
-    // One entry per CPU package. energy_uj is root only unless a udev rule
-    // relaxes it, so unreadable counters are dropped here and reported as
-    // unavailable instead of failing on every refresh.
+    // Fallback for platforms without readable energy counters: some chips,
+    // zenpower among them, publish the CPU power draw directly in microwatts.
+    _findPowerPath(chips) {
+        for (const chip of CPU_TEMP_CHIPS) {
+            const dir = chips.find(entry => entry.name === chip)?.dir;
+            if (!dir)
+                continue;
+
+            for (const file of ['power1_average', 'power1_input']) {
+                if (readNumber(`${dir}/${file}`) !== null)
+                    return `${dir}/${file}`;
+            }
+        }
+        return null;
+    }
+
+    // One entry per CPU package, from whatever powercap driver the platform
+    // provides: intel-rapl covers both Intel and AMD, intel-rapl-mmio some
+    // boards. energy_uj is root only unless a udev rule relaxes it, so
+    // unreadable counters are dropped here and reported as unavailable
+    // instead of failing on every refresh.
     _findEnergyPaths() {
-        const paths = [];
+        const packages = [];
+        const platform = [];
         for (const entry of listDir('/sys/class/powercap')) {
-            if (!/^intel-rapl:\d+$/.test(entry))
+            if (!POWERCAP_ZONE.test(entry))
                 continue;
 
             const dir = `/sys/class/powercap/${entry}`;
             const name = readFile(`${dir}/name`)?.trim() ?? '';
-            if (!name.startsWith('package'))
-                continue;
             if (readNumber(`${dir}/energy_uj`) === null)
                 continue;
 
-            paths.push({
+            const zone = {
                 energy: `${dir}/energy_uj`,
                 max: readNumber(`${dir}/max_energy_range_uj`) ?? 0,
-            });
+            };
+            if (name.startsWith('package'))
+                packages.push(zone);
+            else if (name === 'psys')
+                platform.push(zone);
         }
-        return paths;
+
+        // psys measures the whole platform, so it only stands in when no
+        // package counter is readable: adding both would double count.
+        return packages.length > 0 ? packages : platform;
     }
 
+    // cpufreq is absent on some virtual machines, where /proc/cpuinfo is the
+    // only source, so an empty list here is not the end of it.
     _findFreqPaths() {
         const base = '/sys/devices/system/cpu';
-        return listDir(base)
-            .filter(entry => /^cpu\d+$/.test(entry))
-            .map(entry => `${base}/${entry}/cpufreq/scaling_cur_freq`)
-            .filter(path => readNumber(path) !== null);
+        const paths = [];
+        for (const entry of listDir(base).sort()) {
+            if (!/^cpu\d+$/.test(entry))
+                continue;
+
+            const dir = `${base}/${entry}/cpufreq`;
+            for (const file of ['scaling_cur_freq', 'cpuinfo_cur_freq']) {
+                if (readNumber(`${dir}/${file}`) !== null) {
+                    paths.push(`${dir}/${file}`);
+                    break;
+                }
+            }
+        }
+        return paths;
     }
 
     _usage() {
@@ -255,8 +398,18 @@ class CpuMonitor {
         return value === null ? null : value / 1000;
     }
 
-    // Watts derived from the energy counter delta between two refreshes.
+    // The energy counter when there is one, otherwise a direct hwmon reading.
     _power() {
+        const energy = this._energyPower();
+        if (energy !== null || this._energyPaths.length > 0)
+            return energy;
+
+        const watts = this._powerPath ? readNumber(this._powerPath) : null;
+        return watts === null ? null : watts / 1e6;
+    }
+
+    // Watts derived from the energy counter delta between two refreshes.
+    _energyPower() {
         const now = GLib.get_monotonic_time();
 
         // The counters can become readable mid session, once the udev rule is
@@ -299,7 +452,7 @@ class CpuMonitor {
 
     _freq() {
         if (this._freqPaths.length === 0)
-            return null;
+            return this._cpuinfoFreq();
 
         let total = 0;
         let count = 0;
@@ -311,6 +464,20 @@ class CpuMonitor {
             }
         }
         return count > 0 ? total / count / 1000 : null;
+    }
+
+    // Averaged over the cores, like the cpufreq reading, in MHz already.
+    _cpuinfoFreq() {
+        let total = 0;
+        let count = 0;
+        for (const line of (readFile('/proc/cpuinfo') ?? '').split('\n')) {
+            const match = /^cpu MHz\s*:\s*([\d.]+)/.exec(line);
+            if (match) {
+                total += Number(match[1]);
+                count++;
+            }
+        }
+        return count > 0 ? total / count : null;
     }
 }
 
@@ -366,24 +533,18 @@ class DiskMonitor {
         };
     }
 
-    // NVMe reports a Composite sensor, SATA drives expose drivetemp.
+    // NVMe reports a Composite sensor and SATA drives expose drivetemp; any
+    // other chip that hangs off a block device is taken as a drive too, so an
+    // unusual controller is not left out by name.
     _findTempSensors() {
         const sensors = [];
-        for (const entry of listDir('/sys/class/hwmon')) {
-            const dir = `/sys/class/hwmon/${entry}`;
-            const chip = readFile(`${dir}/name`)?.trim() ?? '';
-            if (chip !== 'nvme' && chip !== 'drivetemp')
+        for (const {name: chip, dir} of hwmonChips()) {
+            const known = chip === 'nvme' || chip === 'drivetemp';
+            if (!known && listDir(`${dir}/device/block`).length === 0)
                 continue;
 
             const inputs = listDir(dir).filter(f => /^temp\d+_input$/.test(f)).sort();
-            let path = null;
-            for (const input of inputs) {
-                const label = readFile(`${dir}/${input.replace('_input', '_label')}`)?.trim() ?? '';
-                if (/composite/i.test(label)) {
-                    path = `${dir}/${input}`;
-                    break;
-                }
-            }
+            let path = chipTempPath(dir, /composite/i);
             if (!path && inputs.length > 0)
                 path = `${dir}/${inputs[0]}`;
             if (path)
@@ -459,21 +620,187 @@ class DiskMonitor {
     }
 }
 
-// NVIDIA is the only backend: it is the one vendor that exposes usage,
-// temperature and power draw through a single supported command.
+// One card read through the kernel DRM and hwmon interfaces, which is what
+// amdgpu, i915, xe, nouveau and radeon expose. Drivers publish different
+// subsets of these files, and what is missing is reported as unavailable, so
+// the same code serves every vendor.
+class SysfsGpu {
+    constructor(card) {
+        this._base = `/sys/class/drm/${card}`;
+        this._device = `${this._base}/device`;
+        this._prevEnergy = null;
+
+        const uevent = readFile(`${this._device}/uevent`) ?? '';
+        this.driver = /^DRIVER=(.*)$/m.exec(uevent)?.[1]?.trim() ?? '';
+        const id = /^PCI_ID=([0-9A-Fa-f]{4}):([0-9A-Fa-f]{4})/m.exec(uevent);
+        this._vendorId = id ? id[1].toLowerCase() : null;
+        this._deviceId = id ? id[2].toLowerCase() : null;
+
+        this._hwmon = this._findHwmon();
+        this._tempPath = this._hwmon ? chipTempPath(this._hwmon, /edge|junction|gpu/i) ??
+            this._firstInput('temp') : null;
+        this._powerPath = this._findPowerPath();
+        this._powerCapPath = this._findFirst(this._hwmon,
+            ['power1_cap', 'power1_max']);
+        this._energyPath = this._findFirst(this._hwmon, ['energy1_input']);
+        this._freqPath = this._findFreqPath();
+        this.name = this._findName(card);
+    }
+
+    // A card with no readable sensor at all, a virtual framebuffer for
+    // example, would only add an empty section to the menu.
+    get hasSensors() {
+        return this._tempPath !== null || this._powerPath !== null ||
+            this._energyPath !== null || this._freqPath !== null ||
+            readNumber(`${this._device}/gpu_busy_percent`) !== null ||
+            readNumber(`${this._device}/mem_info_vram_total`) !== null;
+    }
+
+    read() {
+        const busy = readNumber(`${this._device}/gpu_busy_percent`);
+        const used = readNumber(`${this._device}/mem_info_vram_used`);
+        const total = readNumber(`${this._device}/mem_info_vram_total`);
+        const temp = this._tempPath ? readNumber(this._tempPath) : null;
+        const cap = this._powerCapPath ? readNumber(this._powerCapPath) : null;
+        const freq = this._freqPath ? readNumber(this._freqPath) : null;
+
+        return {
+            name: this.name,
+            usage: busy === null ? null : Math.min(1, Math.max(0, busy / 100)),
+            temp: temp === null ? null : temp / 1000,
+            memoryUsed: used,
+            memoryTotal: total,
+            memoryUsage: used !== null && total ? used / total : null,
+            power: this._power(),
+            powerLimit: cap === null ? null : cap / 1e6,
+            // freq1_input is in hertz, the i915 and xe files in megahertz.
+            freq: freq === null ? null
+                : (this._freqPath.endsWith('_mhz') ? freq : freq / 1e6),
+        };
+    }
+
+    _findHwmon() {
+        const dirs = listDir(`${this._device}/hwmon`).filter(e => /^hwmon\d+$/.test(e)).sort();
+        return dirs.length > 0 ? `${this._device}/hwmon/${dirs[0]}` : null;
+    }
+
+    _firstInput(kind) {
+        if (!this._hwmon)
+            return null;
+        const inputs = listDir(this._hwmon)
+            .filter(f => new RegExp(`^${kind}\\d+_input$`).test(f)).sort();
+        return inputs.length > 0 ? `${this._hwmon}/${inputs[0]}` : null;
+    }
+
+    _findFirst(dir, files) {
+        if (!dir)
+            return null;
+        for (const file of files) {
+            if (readNumber(`${dir}/${file}`) !== null)
+                return `${dir}/${file}`;
+        }
+        return null;
+    }
+
+    // Average draw where the driver computes it, the instantaneous value
+    // otherwise; discrete Intel cards only expose an energy counter.
+    _findPowerPath() {
+        return this._findFirst(this._hwmon, ['power1_average', 'power1_input']);
+    }
+
+    // amdgpu reports the shader clock in hwmon, the Intel drivers under the
+    // card itself, with the gt subdirectory used by xe.
+    _findFreqPath() {
+        const candidates = [
+            this._hwmon ? `${this._hwmon}/freq1_input` : null,
+            `${this._base}/gt_cur_freq_mhz`,
+            `${this._base}/gt/gt0/rps_cur_freq_mhz`,
+        ];
+        return candidates.find(path => path && readNumber(path) !== null) ?? null;
+    }
+
+    _findName(card) {
+        const model = pciDeviceName(this._vendorId, this._deviceId);
+        if (model)
+            return model;
+
+        const vendor = PCI_VENDORS.get(this._vendorId);
+        return vendor ? `${vendor} ${_('GPU')}` : `${_('GPU')} ${card}`;
+    }
+
+    _power() {
+        if (this._powerPath) {
+            const value = readNumber(this._powerPath);
+            return value === null ? null : value / 1e6;
+        }
+        if (!this._energyPath)
+            return null;
+
+        const total = readNumber(this._energyPath);
+        const now = GLib.get_monotonic_time();
+        const prev = this._prevEnergy;
+        if (total === null)
+            return null;
+
+        this._prevEnergy = {total, time: now};
+        if (!prev)
+            return null;
+
+        const seconds = (now - prev.time) / GLib.USEC_PER_SEC;
+        const delta = total - prev.total;
+        if (seconds <= 0 || delta < 0)
+            return null;
+        return delta / 1e6 / seconds;
+    }
+}
+
+// NVIDIA cards are read with nvidia-smi, the only interface the proprietary
+// driver exposes. Every other card, AMD and Intel included, is read from
+// sysfs, so no extra tool is needed for them.
 class GpuMonitor {
     constructor() {
         this._smi = GLib.find_program_in_path('nvidia-smi');
+        this._cards = this._findCards();
     }
 
     get available() {
-        return this._smi !== null;
+        return this._smi !== null || this._cards.length > 0;
     }
 
     async read() {
-        if (!this._smi)
-            return [];
+        const gpus = [];
 
+        if (this._smi) {
+            try {
+                gpus.push(...await this._readNvidia());
+            } catch {
+                // Driver busy or missing: its cards are hidden this refresh.
+            }
+        }
+        for (const card of this._cards)
+            gpus.push(card.read());
+
+        return gpus;
+    }
+
+    _findCards() {
+        const cards = [];
+        for (const entry of listDir('/sys/class/drm').sort()) {
+            if (!/^card\d+$/.test(entry))
+                continue;
+
+            const card = new SysfsGpu(entry);
+            // The proprietary driver publishes almost nothing in sysfs, and
+            // nvidia-smi already reports those cards in full.
+            if (card.driver === 'nvidia' && this._smi)
+                continue;
+            if (card.hasSensors)
+                cards.push(card);
+        }
+        return cards;
+    }
+
+    async _readNvidia() {
         const out = await runCommand([this._smi,
             `--query-gpu=${NVIDIA_QUERY}`, '--format=csv,noheader,nounits']);
 
@@ -495,8 +822,8 @@ class GpuMonitor {
                 name: fields[0] ?? _('GPU'),
                 usage: number(1) === null ? null : number(1) / 100,
                 temp: number(2),
-                memoryUsed: used === null ? null : used * 1024 * 1024,
-                memoryTotal: total === null ? null : total * 1024 * 1024,
+                memoryUsed: used === null ? null : used * MIB,
+                memoryTotal: total === null ? null : total * MIB,
                 memoryUsage: used !== null && total ? used / total : null,
                 power: number(5),
                 powerLimit: number(6),
@@ -669,7 +996,7 @@ class StatusMonitorIndicator extends PanelMenu.Button {
 
         this._cpuChip = new PanelChip(_('CPU'), this._icons.cpu);
         this._memoryChip = new PanelChip(_('RAM'), this._icons.memory);
-        this._diskChip = new PanelChip(_('SSD'), this._icons.ssd);
+        this._diskChip = new PanelChip(_('DISK'), this._icons.ssd);
         this._gpuChip = new PanelChip(_('GPU'), this._icons.gpu);
         box.add_child(this._cpuChip);
         box.add_child(this._memoryChip);

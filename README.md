@@ -3,7 +3,11 @@
 GNOME Shell extension that shows CPU, memory, storage and GPU usage,
 temperature and power draw in the top bar, with the detail in a drop down menu.
 
-Tested on GNOME Shell 48 (Wayland), with an Intel CPU and an NVIDIA GPU.
+Everything is read from `/proc` and `sysfs`, so it works on Intel and AMD
+processors and on AMD, Intel and NVIDIA graphics without any helper daemon.
+Sensors the machine does not expose are hidden instead of shown as N/A.
+
+Developed on GNOME Shell 48 (Wayland) with an Intel CPU and an NVIDIA GPU.
 
 ## Features
 
@@ -12,26 +16,33 @@ Tested on GNOME Shell 48 (Wayland), with an Intel CPU and an NVIDIA GPU.
 - Menu: usage, temperature, power and frequency per device, memory and swap in
   GiB, VRAM per GPU, and used space, throughput and per drive temperature for
   storage, with level bars that turn yellow at 75% and red at 90%.
-- Each group is marked with its device icon, a text prefix (`CPU`, `RAM`, `SSD`,
-  `GPU`) or nothing, as configured.
+- Each group is marked with its device icon, a text prefix (`CPU`, `RAM`,
+  `DISK`, `GPU`) or nothing, as configured.
 - The monitored filesystem is configurable, `/` by default. The panel shows the
   temperature of the hottest drive; the menu lists every drive by model.
 - Sensors the machine does not expose are hidden rather than shown as N/A.
-- Multiple GPUs get one section each.
+- Multiple GPUs get one section each, whatever the vendor mix.
 
 ## Requirements
 
 | Requirement | Needed for | If missing |
 | --- | --- | --- |
 | GNOME Shell 45 to 48 | Everything | The extension does not load |
-| `nvidia-smi` in PATH | GPU section | GPU section and its panel values are hidden |
-| Readable RAPL counter | CPU power in watts | CPU power row and panel value are hidden |
+| `nvidia-smi` in PATH | NVIDIA cards | The card is hidden, others still shown |
+| Readable energy counter | CPU power in watts | CPU power row and panel value are hidden |
 
 Nothing else is required. CPU usage, temperatures, frequency, memory, disk
-space and disk activity are read straight from `/proc` and `sysfs`, so no
-`lm-sensors` install and no helper daemon is involved. AMD and Intel GPUs are
-not supported: only NVIDIA exposes usage, temperature and power draw through a
-single supported command.
+space, disk activity and non NVIDIA graphics are read straight from `/proc` and
+`sysfs`, so no `lm-sensors` install and no helper daemon is involved.
+
+Each driver publishes a different subset of the GPU values:
+
+| Driver | Usage | Memory | Temperature | Power | Frequency |
+| --- | --- | --- | --- | --- | --- |
+| NVIDIA (`nvidia-smi`) | yes | yes | yes | yes | yes |
+| `amdgpu` | yes | yes | yes | yes | yes |
+| `i915`, `xe` | no | no | if the card has a sensor | from the energy counter | yes |
+| `nouveau`, `radeon` | no | no | yes | no | no |
 
 `lm-sensors` is still handy to see what your machine exposes at all:
 
@@ -60,19 +71,22 @@ To uninstall, disable it and remove the directory:
 
 ## CPU power in watts
 
-The value comes from the Intel RAPL energy counter, which the kernel restricts
-to root. Grant read access once with:
+The value comes from the RAPL energy counter, exposed by the kernel powercap
+driver on Intel and on AMD, which the kernel restricts to root. Grant read
+access once with:
 
     ./enable-cpu-power.sh
 
 Run it as your normal user, it calls `sudo` where it needs to. It installs a
-udev rule that gives the package level `energy_uj` mode `0440` and your primary
-group. The finer core and dram counters stay root only, and nothing becomes
+udev rule that gives every package level `energy_uj` mode `0440` and your
+primary group. The finer core and dram counters stay root only, and nothing becomes
 writable, so power limits cannot be changed through it. Undo it with:
 
     ./disable-cpu-power.sh
 
 This is optional. Without it every other value still works, GPU watts included.
+Chips that publish the CPU power directly, `zenpower` for example, are used as
+they are and need no rule.
 
 The counter is restricted because a high resolution energy reading is a power
 side channel: sampled fast enough it leaks information about what other
@@ -107,17 +121,19 @@ exposure is small, but it is not zero. Decide accordingly.
 | Value | Source |
 | --- | --- |
 | CPU usage | `/proc/stat` |
-| CPU temperature | `hwmon` package sensor (`coretemp`, `k10temp`, `zenpower`, ...) |
-| CPU power | `/sys/class/powercap/intel-rapl:N/energy_uj` delta |
+| CPU temperature | `hwmon` package sensor (`coretemp`, `k10temp`, `zenpower`, ...), then any package label, then a `thermal_zone` |
+| CPU power | `/sys/class/powercap/*:N/energy_uj` delta, or `hwmon` `power1_*` |
 | CPU frequency | `cpufreq/scaling_cur_freq`, averaged over the cores |
 | Memory, swap | `/proc/meminfo` |
 | Disk used space | `statvfs` of the configured mount point |
 | Disk temperature | `hwmon` `nvme` Composite sensor, or `drivetemp` for SATA |
 | Disk activity | `/proc/diskstats` sector counters |
-| GPU | `nvidia-smi --query-gpu` |
+| GPU, NVIDIA | `nvidia-smi --query-gpu` |
+| GPU, other | `/sys/class/drm/cardN` and its `hwmon` chip |
+| GPU model name | `/usr/share/hwdata/pci.ids`, or `/usr/share/misc/pci.ids` |
 
-Everything except the GPU is read directly from the kernel, so only the GPU
-values spawn a process.
+Everything except NVIDIA cards is read directly from the kernel, so only they
+spawn a process.
 
 ## Icons
 

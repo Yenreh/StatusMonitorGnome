@@ -6,21 +6,68 @@ import Gtk from 'gi://Gtk';
 import {ExtensionPreferences, gettext as _} from
     'resource:///org/gnome/Shell/Extensions/js/extensions/prefs.js';
 
-// The RAPL energy counter is root only until a udev rule relaxes it.
+function readFile(path) {
+    try {
+        const [ok, bytes] = GLib.file_get_contents(path);
+        return ok ? new TextDecoder().decode(bytes) : null;
+    } catch {
+        return null;
+    }
+}
+
+function listDir(path) {
+    const names = [];
+    try {
+        const iter = Gio.File.new_for_path(path).enumerate_children(
+            'standard::name', Gio.FileQueryInfoFlags.NONE, null);
+        let info;
+        while ((info = iter.next_file(null)) !== null)
+            names.push(info.get_name());
+    } catch {
+        // Missing directory: nothing to report.
+    }
+    return names;
+}
+
+// The energy counter is root only until a udev rule relaxes it. Any powercap
+// package zone counts, so Intel and AMD are both covered; a chip publishing
+// watts directly, zenpower for example, works without any rule.
 function cpuPowerAvailable() {
-    for (let i = 0; i < 8; i++) {
-        const dir = `/sys/class/powercap/intel-rapl:${i}`;
-        try {
-            const [ok, bytes] = GLib.file_get_contents(`${dir}/name`);
-            if (!ok || !new TextDecoder().decode(bytes).startsWith('package'))
-                continue;
-            if (GLib.file_get_contents(`${dir}/energy_uj`)[0])
-                return true;
-        } catch {
-            // Missing or unreadable: keep looking at the next package.
-        }
+    for (const entry of listDir('/sys/class/powercap')) {
+        if (!/^[\w.-]+:\d+$/.test(entry))
+            continue;
+
+        const dir = `/sys/class/powercap/${entry}`;
+        if (!(readFile(`${dir}/name`) ?? '').startsWith('package'))
+            continue;
+        if (readFile(`${dir}/energy_uj`) !== null)
+            return true;
+    }
+
+    for (const entry of listDir('/sys/class/hwmon')) {
+        const dir = `/sys/class/hwmon/${entry}`;
+        const chip = readFile(`${dir}/name`)?.trim() ?? '';
+        if (!/^(coretemp|k10temp|zenpower|k8temp)$/.test(chip))
+            continue;
+        if (readFile(`${dir}/power1_average`) !== null ||
+            readFile(`${dir}/power1_input`) !== null)
+            return true;
     }
     return false;
+}
+
+// What the GPU group can actually show on this machine.
+function gpuDescription() {
+    const nvidia = GLib.find_program_in_path('nvidia-smi') !== null;
+    const cards = listDir('/sys/class/drm')
+        .filter(entry => /^card\d+$/.test(entry))
+        .some(entry => readFile(`/sys/class/drm/${entry}/device/uevent`) !== null);
+
+    if (nvidia)
+        return _('NVIDIA cards are read with nvidia-smi, other cards from the kernel');
+    if (cards)
+        return _('Read from the kernel; values the driver does not publish stay hidden');
+    return _('No card detected. NVIDIA needs nvidia-smi in PATH');
 }
 
 const PREFIX_STYLES = ['icon', 'text', 'none'];
@@ -61,7 +108,7 @@ export default class StatusMonitorGnomePreferences extends ExtensionPreferences 
         const powerRow = addSwitch(settings, cpu, 'show-cpu-power', _('Power'));
         if (!cpuPowerAvailable()) {
             powerRow.subtitle =
-                _('Unavailable: run enable-cpu-power.sh to allow reading the RAPL counter');
+                _('Unavailable: run enable-cpu-power.sh to allow reading the energy counter');
         }
 
         const memory = new Adw.PreferencesGroup({title: _('Memory')});
@@ -85,7 +132,7 @@ export default class StatusMonitorGnomePreferences extends ExtensionPreferences 
 
         const gpu = new Adw.PreferencesGroup({
             title: _('GPU'),
-            description: _('Requires nvidia-smi in PATH'),
+            description: gpuDescription(),
         });
         page.add(gpu);
         addSwitch(settings, gpu, 'show-gpu-usage', _('Usage'));

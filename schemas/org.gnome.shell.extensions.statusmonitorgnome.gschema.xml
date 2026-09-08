@@ -25,7 +25,7 @@
     <key name="show-cpu-power" type="b">
       <default>true</default>
       <summary>Show CPU power</summary>
-      <description>Show the CPU package power draw in the panel. Needs read access to the RAPL energy counter.</description>
+      <description>Show the CPU package power draw in the panel. Needs read access to the powercap energy counter, or a chip reporting watts directly.</description>
     </key>
 
     <key name="show-memory-usage" type="b">
@@ -61,13 +61,13 @@
     <key name="show-gpu-usage" type="b">
       <default>true</default>
       <summary>Show GPU usage</summary>
-      <description>Show the GPU usage percentage in the panel.</description>
+      <description>Show the GPU usage percentage in the panel, when the driver reports it.</description>
     </key>
 
     <key name="show-gpu-vram" type="b">
       <default>false</default>
       <summary>Show GPU memory</summary>
-      <description>Show the used video memory in GiB in the panel.</description>
+      <description>Show the used video memory in GiB in the panel, when the driver reports it.</description>
     </key>
 
     <key name="show-gpu-temp" type="b">
