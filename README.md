@@ -7,8 +7,8 @@ Tested on GNOME Shell 48 (Wayland), with an Intel CPU and an NVIDIA GPU.
 
 ## Features
 
-- Panel: one group of values per device, for example `CPU 12% 38°C 21 W`. Every
-  value can be shown or hidden independently.
+- Panel: one group of values per device, in CPU, memory, GPU, storage order, for
+  example `CPU 12% 38°C 21 W`. Every value can be shown or hidden independently.
 - Menu: usage, temperature, power and frequency per device, memory and swap in
   GiB, VRAM per GPU, and used space, throughput and per drive temperature for
   storage, with level bars that turn yellow at 75% and red at 90%.
@@ -98,6 +98,7 @@ exposure is small, but it is not zero. Decide accordingly.
 | `show-disk-io` | `false` | Combined read and write throughput |
 | `disk-mount` | `/` | Filesystem whose used space is reported |
 | `show-gpu-usage` | `true` | GPU usage in the panel |
+| `show-gpu-vram` | `false` | Used video memory in GiB in the panel |
 | `show-gpu-temp` | `true` | GPU temperature in the panel |
 | `show-gpu-power` | `true` | GPU watts in the panel |
 

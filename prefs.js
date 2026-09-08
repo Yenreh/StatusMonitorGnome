@@ -89,6 +89,8 @@ export default class StatusMonitorGnomePreferences extends ExtensionPreferences 
         });
         page.add(gpu);
         addSwitch(settings, gpu, 'show-gpu-usage', _('Usage'));
+        addSwitch(settings, gpu, 'show-gpu-vram', _('Video memory'),
+            _('Used VRAM in GiB'));
         addSwitch(settings, gpu, 'show-gpu-temp', _('Temperature'));
         addSwitch(settings, gpu, 'show-gpu-power', _('Power'));
 

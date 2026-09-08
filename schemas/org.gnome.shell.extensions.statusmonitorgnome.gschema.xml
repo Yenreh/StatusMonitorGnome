@@ -64,6 +64,12 @@
       <description>Show the GPU usage percentage in the panel.</description>
     </key>
 
+    <key name="show-gpu-vram" type="b">
+      <default>false</default>
+      <summary>Show GPU memory</summary>
+      <description>Show the used video memory in GiB in the panel.</description>
+    </key>
+
     <key name="show-gpu-temp" type="b">
       <default>true</default>
       <summary>Show GPU temperature</summary>

@@ -673,8 +673,8 @@ class StatusMonitorIndicator extends PanelMenu.Button {
         this._gpuChip = new PanelChip(_('GPU'), this._icons.gpu);
         box.add_child(this._cpuChip);
         box.add_child(this._memoryChip);
-        box.add_child(this._diskChip);
         box.add_child(this._gpuChip);
+        box.add_child(this._diskChip);
 
         this.add_child(box);
     }
@@ -694,6 +694,9 @@ class StatusMonitorIndicator extends PanelMenu.Button {
         this.menu.addMenuItem(this._memoryUsageRow);
         this.menu.addMenuItem(this._swapRow);
 
+        this._gpuSection = new PopupMenu.PopupMenuSection();
+        this.menu.addMenuItem(this._gpuSection);
+
         this.menu.addMenuItem(sectionHeader(this._icons.ssd, _('Storage')));
         this._diskUsageRow = new MetricRow(_('In use'), true);
         this._diskReadRow = new MetricRow(_('Read'));
@@ -709,9 +712,6 @@ class StatusMonitorIndicator extends PanelMenu.Button {
             this.menu.addMenuItem(row);
             return row;
         });
-
-        this._gpuSection = new PopupMenu.PopupMenuSection();
-        this.menu.addMenuItem(this._gpuSection);
 
         this.menu.addMenuItem(new PopupMenu.PopupSeparatorMenuItem());
 
@@ -848,6 +848,15 @@ class StatusMonitorIndicator extends PanelMenu.Button {
             show('show-memory-usage') && memory ? formatPercent(memory.usage) : null,
         ], style);
 
+        this._gpuChip.update([
+            show('show-gpu-usage') && gpu ? formatPercent(gpu.usage) : null,
+            // VRAM in GiB, so it does not read as a second percentage.
+            show('show-gpu-vram') && gpu?.memoryUsed !== null && gpu !== null
+                ? formatGiB(gpu.memoryUsed) : null,
+            show('show-gpu-temp') && gpu ? formatTemp(gpu.temp) : null,
+            show('show-gpu-power') && gpu ? formatWatts(gpu.power) : null,
+        ], style);
+
         const diskTemps = disk.temps.map(drive => drive.temp).filter(temp => temp !== null);
         const diskIo = disk.io ? disk.io.read + disk.io.write : null;
         this._diskChip.update([
@@ -856,12 +865,6 @@ class StatusMonitorIndicator extends PanelMenu.Button {
             show('show-disk-temp') && diskTemps.length > 0
                 ? formatTemp(Math.max(...diskTemps)) : null,
             show('show-disk-io') ? formatRate(diskIo) : null,
-        ], style);
-
-        this._gpuChip.update([
-            show('show-gpu-usage') && gpu ? formatPercent(gpu.usage) : null,
-            show('show-gpu-temp') && gpu ? formatTemp(gpu.temp) : null,
-            show('show-gpu-power') && gpu ? formatWatts(gpu.power) : null,
         ], style);
 
         this._icon.visible = !this._cpuChip.visible && !this._memoryChip.visible &&
