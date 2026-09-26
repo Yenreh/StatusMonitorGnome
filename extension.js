@@ -63,8 +63,11 @@ const PCI_VENDORS = new Map([
 // Where distributions ship the PCI id database that names a card.
 const PCI_IDS_PATHS = ['/usr/share/hwdata/pci.ids', '/usr/share/misc/pci.ids'];
 
-// Fields asked to nvidia-smi, in the order they are parsed.
+// Fields asked to nvidia-smi, in the order they are parsed. index and count
+// come first: each sample is one line per card, and they group the lines.
 const NVIDIA_QUERY = [
+    'index',
+    'count',
     'name',
     'utilization.gpu',
     'temperature.gpu',
@@ -75,6 +78,18 @@ const NVIDIA_QUERY = [
     'clocks.sm',
 ].join(',');
 
+// Seconds before nvidia-smi is started again once it exited by itself, so a
+// missing or broken driver costs a process now and then, not every refresh.
+const NVIDIA_RETRY = 15;
+
+// Seconds a refresh waits for the first sample of a fresh nvidia-smi, so a
+// driver that hangs cannot stall the refresh loop.
+const NVIDIA_START_TIMEOUT = 5;
+
+// Panel values of the GPU group: while all are off and the menu is closed,
+// the GPU is not queried at all.
+const GPU_PANEL_KEYS = ['show-gpu-usage', 'show-gpu-vram', 'show-gpu-temp', 'show-gpu-power'];
+
 function readFile(path) {
     try {
         const [ok, bytes] = GLib.file_get_contents(path);
@@ -84,12 +99,34 @@ function readFile(path) {
     }
 }
 
-function readNumber(path) {
-    const text = readFile(path);
+// For files whose read waits on the hardware: the read runs in a GIO worker
+// thread, so the shell never stalls on it.
+function readFileAsync(path) {
+    return new Promise(resolve => {
+        Gio.File.new_for_path(path).load_contents_async(null, (file, res) => {
+            try {
+                const [, bytes] = file.load_contents_finish(res);
+                resolve(new TextDecoder().decode(bytes));
+            } catch {
+                resolve(null);
+            }
+        });
+    });
+}
+
+function toNumber(text) {
     if (text === null)
         return null;
     const value = Number(text.trim());
     return Number.isFinite(value) ? value : null;
+}
+
+function readNumber(path) {
+    return toNumber(readFile(path));
+}
+
+async function readNumberAsync(path) {
+    return toNumber(await readFileAsync(path));
 }
 
 function listDir(path) {
@@ -104,30 +141,6 @@ function listDir(path) {
         // Missing directory: the sensor simply does not exist here.
     }
     return names;
-}
-
-function runCommand(argv) {
-    return new Promise((resolve, reject) => {
-        let proc;
-        try {
-            proc = Gio.Subprocess.new(argv,
-                Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_PIPE);
-        } catch (e) {
-            reject(e);
-            return;
-        }
-        proc.communicate_utf8_async(null, null, (obj, res) => {
-            try {
-                const [, stdout, stderr] = obj.communicate_utf8_finish(res);
-                if (obj.get_successful())
-                    resolve(stdout ?? '');
-                else
-                    reject(new Error((stderr || stdout || '').trim() || _('Command failed')));
-            } catch (e) {
-                reject(e);
-            }
-        });
-    });
 }
 
 // Every hwmon chip as {name, dir}. One pass, since several monitors look for
@@ -167,10 +180,16 @@ function pciDeviceName(vendorId, deviceId) {
     if (pciNameCache.has(key))
         return pciNameCache.get(key);
 
-    const text = PCI_IDS_PATHS.map(readFile).find(value => value !== null) ?? '';
+    let text = null;
+    for (const path of PCI_IDS_PATHS) {
+        text = readFile(path);
+        if (text !== null)
+            break;
+    }
+
     let name = null;
     let inVendor = false;
-    for (const line of text.split('\n')) {
+    for (const line of (text ?? '').split('\n')) {
         if (line.startsWith('#'))
             continue;
 
@@ -178,7 +197,7 @@ function pciDeviceName(vendorId, deviceId) {
             // The vendor block is over, the device is not listed.
             if (inVendor)
                 break;
-            inVendor = new RegExp(`^${vendorId}\\s`).test(line);
+            inVendor = line.startsWith(`${vendorId} `);
         } else if (inVendor && !line.startsWith('\t\t')) {
             const match = /^\t([0-9a-f]{4})\s+(.+)$/.exec(line);
             if (match && match[1] === deviceId) {
@@ -231,6 +250,10 @@ function formatGiB(bytes) {
 function formatRate(bytesPerSecond) {
     if (bytesPerSecond === null)
         return null;
+    // GiB/s where MiB/s would round to four integer digits, which do not fit
+    // the width WIDTH_RATE reserves; fast NVMe drives get there.
+    if (bytesPerSecond >= 999.95 * MIB)
+        return `${(bytesPerSecond / GIB).toFixed(2)} GiB/s`;
     if (bytesPerSecond >= MIB)
         return `${(bytesPerSecond / MIB).toFixed(1)} MiB/s`;
     return `${Math.round(bytesPerSecond / KIB)} KiB/s`;
@@ -538,15 +561,19 @@ class DiskMonitor {
         this.sensors = this._findTempSensors();
     }
 
-    read(mount) {
-        return {
-            space: this._space(mount),
-            temps: this.sensors.map(sensor => ({
-                name: sensor.name,
-                temp: this._readTemp(sensor.path),
-            })),
-            io: this._io(),
-        };
+    async read(mount) {
+        const io = this._io();
+        return {space: await this._space(mount), io};
+    }
+
+    // One temperature per sensor, in the same order. Each read is a command
+    // sent to the drive, which takes milliseconds and more when the drive has
+    // to leave a power saving state, so it runs off the main thread.
+    readTemps() {
+        return Promise.all(this.sensors.map(async sensor => {
+            const value = await readNumberAsync(sensor.path);
+            return value === null ? null : value / 1000;
+        }));
     }
 
     // NVMe reports a Composite sensor and SATA drives expose drivetemp; any
@@ -579,27 +606,31 @@ class DiskMonitor {
         return block ?? _('Drive');
     }
 
-    _readTemp(path) {
-        const value = readNumber(path);
-        return value === null ? null : value / 1000;
-    }
-
+    // Queried off the main thread: statfs waits for as long as a network
+    // mount stalls, and the whole shell would freeze with it.
     _space(mount) {
-        try {
-            const info = Gio.File.new_for_path(mount).query_filesystem_info(
-                'filesystem::size,filesystem::used,filesystem::free', null);
-            const total = info.get_attribute_uint64('filesystem::size');
-            if (total === 0)
-                return null;
+        return new Promise(resolve => {
+            Gio.File.new_for_path(mount).query_filesystem_info_async(
+                'filesystem::size,filesystem::used,filesystem::free',
+                GLib.PRIORITY_DEFAULT, null, (file, res) => {
+                    try {
+                        const info = file.query_filesystem_info_finish(res);
+                        const total = info.get_attribute_uint64('filesystem::size');
+                        if (total === 0) {
+                            resolve(null);
+                            return;
+                        }
 
-            const used = info.has_attribute('filesystem::used')
-                ? info.get_attribute_uint64('filesystem::used')
-                : total - info.get_attribute_uint64('filesystem::free');
-            return {total, used, usage: used / total};
-        } catch {
-            // Missing mount point, reported as unavailable.
-            return null;
-        }
+                        const used = info.has_attribute('filesystem::used')
+                            ? info.get_attribute_uint64('filesystem::used')
+                            : total - info.get_attribute_uint64('filesystem::free');
+                        resolve({total, used, usage: used / total});
+                    } catch {
+                        // Missing mount point, reported as unavailable.
+                        resolve(null);
+                    }
+                });
+        });
     }
 
     // Sectors are always 512 bytes in /proc/diskstats, whatever the device
@@ -660,7 +691,15 @@ class SysfsGpu {
             ['power1_cap', 'power1_max']);
         this._energyPath = this._findFirst(this._hwmon, ['energy1_input']);
         this._freqPath = this._findFreqPath();
-        this.name = this._findName(card);
+        this._card = card;
+        this._name = null;
+    }
+
+    // Looked up on first use, so cards that are skipped never parse the PCI
+    // id database.
+    get name() {
+        this._name ??= this._findName(this._card);
+        return this._name;
     }
 
     // A card with no readable sensor at all, a virtual framebuffer for
@@ -770,33 +809,177 @@ class SysfsGpu {
     }
 }
 
+// nvidia-smi started once in loop mode, printing one line per card every
+// refresh interval. Starting it for each refresh would fork the whole shell,
+// stalling it for milliseconds, and load the NVIDIA library again, tens of
+// CPU milliseconds, for one line of output.
+class NvidiaSmi {
+    constructor(path) {
+        this._path = path;
+        this._proc = null;
+        this._cancellable = null;
+        this._interval = 0;
+        this._sample = null;
+        this._lines = [];
+        this._waiters = [];
+        this._startTimeoutId = 0;
+        this._exitedAt = null;
+    }
+
+    // The last complete sample, starting the process when it is not running.
+    // Right after a start the first sample is awaited, so the refresh that
+    // started it can already show the cards.
+    read(interval) {
+        if (this._proc && interval !== this._interval)
+            this.stop();
+        if (!this._proc && !this._start(interval))
+            return Promise.resolve([]);
+        if (this._sample !== null || !this._startTimeoutId)
+            return Promise.resolve(this._sample ?? []);
+        return new Promise(resolve => this._waiters.push(resolve));
+    }
+
+    stop() {
+        if (!this._proc)
+            return;
+
+        this._cancellable.cancel();
+        this._proc.force_exit();
+        this._reset();
+    }
+
+    _start(interval) {
+        if (this._exitedAt !== null &&
+            GLib.get_monotonic_time() - this._exitedAt < NVIDIA_RETRY * GLib.USEC_PER_SEC)
+            return false;
+
+        try {
+            this._proc = Gio.Subprocess.new([this._path, `--query-gpu=${NVIDIA_QUERY}`,
+                '--format=csv,noheader,nounits', `--loop=${interval}`],
+            Gio.SubprocessFlags.STDOUT_PIPE | Gio.SubprocessFlags.STDERR_SILENCE);
+        } catch {
+            this._exitedAt = GLib.get_monotonic_time();
+            return false;
+        }
+
+        this._interval = interval;
+        this._cancellable = new Gio.Cancellable();
+        this._startTimeoutId = GLib.timeout_add_seconds(GLib.PRIORITY_DEFAULT,
+            NVIDIA_START_TIMEOUT, () => {
+                this._startTimeoutId = 0;
+                this._resolve([]);
+                return GLib.SOURCE_REMOVE;
+            });
+        this._readLine(new Gio.DataInputStream({
+            base_stream: this._proc.get_stdout_pipe(),
+            close_base_stream: true,
+        }), this._cancellable);
+        return true;
+    }
+
+    _readLine(stdout, cancellable) {
+        stdout.read_line_async(GLib.PRIORITY_DEFAULT, cancellable, (stream, res) => {
+            let line = null;
+            try {
+                [line] = stream.read_line_finish_utf8(res);
+            } catch {
+                // Cancelled by stop(), or a broken pipe, handled as an exit.
+            }
+            if (cancellable.is_cancelled())
+                return;
+
+            if (line === null) {
+                // Loop mode only ends when nvidia-smi fails.
+                this._exitedAt = GLib.get_monotonic_time();
+                this._reset();
+                return;
+            }
+
+            this._parse(line);
+            this._readLine(stdout, cancellable);
+        });
+    }
+
+    // Cards come in index order, and a sample is complete with the last one.
+    _parse(line) {
+        const fields = line.split(',').map(field => field.trim());
+        const index = Number(fields[0]);
+        const count = Number(fields[1]);
+        // Error messages, printed in place of a sample, carry no index.
+        if (!Number.isInteger(index) || !Number.isInteger(count))
+            return;
+        if (index === 0)
+            this._lines = [];
+
+        // Unsupported readings come back as [N/A] on some models.
+        const number = i => {
+            const value = Number(fields[i]);
+            return Number.isFinite(value) ? value : null;
+        };
+        const used = number(5);
+        const total = number(6);
+        this._lines.push({
+            name: fields[2] || _('GPU'),
+            usage: number(3) === null ? null : number(3) / 100,
+            temp: number(4),
+            memoryUsed: used === null ? null : used * MIB,
+            memoryTotal: total === null ? null : total * MIB,
+            memoryUsage: used !== null && total ? used / total : null,
+            power: number(7),
+            powerLimit: number(8),
+            freq: number(9),
+        });
+
+        if (index === count - 1) {
+            this._sample = this._lines;
+            this._lines = [];
+            this._resolve(this._sample);
+        }
+    }
+
+    _resolve(gpus) {
+        if (this._startTimeoutId) {
+            GLib.Source.remove(this._startTimeoutId);
+            this._startTimeoutId = 0;
+        }
+        for (const resolve of this._waiters.splice(0))
+            resolve(gpus);
+    }
+
+    _reset() {
+        this._proc = null;
+        this._cancellable = null;
+        this._sample = null;
+        this._lines = [];
+        this._resolve([]);
+    }
+}
+
 // NVIDIA cards are read with nvidia-smi, the only interface the proprietary
 // driver exposes. Every other card, AMD and Intel included, is read from
 // sysfs, so no extra tool is needed for them.
 class GpuMonitor {
     constructor() {
-        this._smi = GLib.find_program_in_path('nvidia-smi');
+        const smi = GLib.find_program_in_path('nvidia-smi');
+        this._nvidia = smi ? new NvidiaSmi(smi) : null;
         this._cards = this._findCards();
     }
 
     get available() {
-        return this._smi !== null || this._cards.length > 0;
+        return this._nvidia !== null || this._cards.length > 0;
     }
 
-    async read() {
-        const gpus = [];
-
-        if (this._smi) {
-            try {
-                gpus.push(...await this._readNvidia());
-            } catch {
-                // Driver busy or missing: its cards are hidden this refresh.
-            }
-        }
+    // interval is the refresh interval, which nvidia-smi samples at.
+    async read(interval) {
+        const gpus = this._nvidia ? [...await this._nvidia.read(interval)] : [];
         for (const card of this._cards)
             gpus.push(card.read());
-
         return gpus;
+    }
+
+    // Ends nvidia-smi while nothing shows the GPU, the next read starts it.
+    stop() {
+        this._nvidia?.stop();
     }
 
     _findCards() {
@@ -808,45 +991,12 @@ class GpuMonitor {
             const card = new SysfsGpu(entry);
             // The proprietary driver publishes almost nothing in sysfs, and
             // nvidia-smi already reports those cards in full.
-            if (card.driver === 'nvidia' && this._smi)
+            if (card.driver === 'nvidia' && this._nvidia)
                 continue;
             if (card.hasSensors)
                 cards.push(card);
         }
         return cards;
-    }
-
-    async _readNvidia() {
-        const out = await runCommand([this._smi,
-            `--query-gpu=${NVIDIA_QUERY}`, '--format=csv,noheader,nounits']);
-
-        const gpus = [];
-        for (const line of out.split('\n')) {
-            if (line.trim() === '')
-                continue;
-
-            const fields = line.split(',').map(field => field.trim());
-            // Unsupported readings come back as [N/A] on some models.
-            const number = index => {
-                const value = Number(fields[index]);
-                return Number.isFinite(value) ? value : null;
-            };
-
-            const used = number(3);
-            const total = number(4);
-            gpus.push({
-                name: fields[0] ?? _('GPU'),
-                usage: number(1) === null ? null : number(1) / 100,
-                temp: number(2),
-                memoryUsed: used === null ? null : used * MIB,
-                memoryTotal: total === null ? null : total * MIB,
-                memoryUsage: used !== null && total ? used / total : null,
-                power: number(5),
-                powerLimit: number(6),
-                freq: number(7),
-            });
-        }
-        return gpus;
     }
 }
 
@@ -928,6 +1078,7 @@ class PanelValue extends St.Widget {
             y_align: Clutter.ActorAlign.CENTER,
         });
 
+        this._reserved = widest;
         this._widest = new St.Label({
             text: widest,
             style_class: 'sm-chip-value',
@@ -944,13 +1095,21 @@ class PanelValue extends St.Widget {
     }
 
     // widest replaces the reserved width, for values whose unit is a setting.
+    // A text longer than the reserved one, such as 100°C, widens the slot for
+    // good: a value going back and forth across that boundary then moves the
+    // panel once instead of on every refresh. Digits are tabular, so length
+    // stands for width.
     update(text, level = null, widest = null) {
         this.visible = text !== null;
         if (text === null)
             return;
 
-        if (widest !== null)
+        if (widest !== null && widest !== this._reserved) {
+            this._reserved = widest;
             this._widest.text = widest;
+        }
+        if (text.length > this._widest.text.length)
+            this._widest.text = text;
         this._label.text = text;
         this._label.style_class = level ? `sm-chip-value sm-level-${level}` : 'sm-chip-value';
     }
@@ -1016,7 +1175,12 @@ class StatusMonitorIndicator extends PanelMenu.Button {
         this._gpu = new GpuMonitor();
         this._gpuRows = [];
         this._gpuSeparators = [];
+        // Last readings of the sensors that are not read on every update,
+        // null until the first one.
+        this._gpus = null;
+        this._driveTemps = null;
         this._updating = false;
+        this._updateQueued = false;
         this._destroyed = false;
         this._timeoutId = 0;
 
@@ -1027,12 +1191,12 @@ class StatusMonitorIndicator extends PanelMenu.Button {
             if (key === 'refresh-interval')
                 this._restartTimer();
             else
-                this._update();
+                this._update(true);
         });
 
         this._menuOpenId = this.menu.connect('open-state-changed', (_menu, open) => {
             if (open)
-                this._update();
+                this._update(true);
         });
 
         this._restartTimer();
@@ -1148,32 +1312,63 @@ class StatusMonitorIndicator extends PanelMenu.Button {
             });
     }
 
-    async _update() {
-        if (this._updating || this._destroyed)
+    // force is for requests that must not be lost to an update already
+    // running, such as the menu opening: that update may have skipped what
+    // only the menu shows, so another one follows it. Timer ticks just drop.
+    async _update(force = false) {
+        if (this._destroyed)
             return;
+        if (this._updating) {
+            this._updateQueued ||= force;
+            return;
+        }
 
         this._updating = true;
         try {
+            // The GPU keeps nvidia-smi running and each drive temperature is a
+            // command sent to the drive, so they are only read while the panel
+            // or the open menu shows them, and once at start to lay out the
+            // menu. nvidia-smi is stopped while nothing shows the GPU.
+            const show = key => this._settings.get_boolean(key);
+            const open = this.menu.isOpen;
+            const readGpu = this._gpus === null || open || GPU_PANEL_KEYS.some(show);
+            const readTemps = this._driveTemps === null || open || show('show-disk-temp');
+            if (!readGpu)
+                this._gpu.stop();
+
             const cpu = this._cpu.read();
             const memory = this._memory.read();
-            const disk = this._disk.read(this._settings.get_string('disk-mount'));
-
-            let gpus = [];
-            if (this._gpu.available) {
-                try {
-                    gpus = await this._gpu.read();
-                } catch {
-                    // Driver busy or missing: the GPU section is hidden.
-                    gpus = [];
-                }
-            }
+            const [disk, driveTemps, gpus] = await Promise.all([
+                this._disk.read(this._settings.get_string('disk-mount')),
+                readTemps ? this._disk.readTemps() : this._driveTemps,
+                readGpu ? this._readGpus() : this._gpus,
+            ]);
             if (this._destroyed)
                 return;
 
-            this._renderMenu(cpu, memory, disk, gpus);
-            this._renderPanel(cpu, memory, disk, gpus[0] ?? null);
+            this._driveTemps = driveTemps;
+            this._gpus = gpus;
+            this._renderMenu(cpu, memory, disk, driveTemps, gpus);
+            this._renderPanel(cpu, memory, disk, driveTemps, gpus[0] ?? null);
         } finally {
             this._updating = false;
+        }
+
+        if (this._updateQueued) {
+            this._updateQueued = false;
+            this._update();
+        }
+    }
+
+    async _readGpus() {
+        if (!this._gpu.available)
+            return [];
+
+        try {
+            return await this._gpu.read(this._settings.get_int('refresh-interval'));
+        } catch {
+            // Driver busy or missing: the GPU section is hidden.
+            return [];
         }
     }
 
@@ -1192,7 +1387,7 @@ class StatusMonitorIndicator extends PanelMenu.Button {
         return this._level(metric, fraction === null ? null : fraction * 100);
     }
 
-    _renderMenu(cpu, memory, disk, gpus) {
+    _renderMenu(cpu, memory, disk, driveTemps, gpus) {
         this._cpuUsageRow.update(formatPercent(cpu.usage), cpu.usage,
             this._usageLevel('cpu-usage', cpu.usage));
         this._cpuTempRow.update(formatTemp(cpu.temp), null,
@@ -1221,8 +1416,8 @@ class StatusMonitorIndicator extends PanelMenu.Button {
             this._usageLevel('disk-usage', disk.space?.usage ?? null));
         this._diskReadRow.update(formatRate(disk.io?.read ?? null));
         this._diskWriteRow.update(formatRate(disk.io?.write ?? null));
-        disk.temps.forEach((drive, i) => this._diskTempRows[i].update(
-            formatTemp(drive.temp), null, this._level('disk-temp', drive.temp)));
+        driveTemps.forEach((temp, i) => this._diskTempRows[i].update(
+            formatTemp(temp), null, this._level('disk-temp', temp)));
 
         if (gpus.length !== this._gpuRows.length)
             this._buildGpuRows(gpus.length);
@@ -1243,7 +1438,7 @@ class StatusMonitorIndicator extends PanelMenu.Button {
         });
     }
 
-    _renderPanel(cpu, memory, disk, gpu) {
+    _renderPanel(cpu, memory, disk, driveTemps, gpu) {
         const show = key => this._settings.get_boolean(key);
         const style = this._settings.get_string('prefix-style');
 
@@ -1277,7 +1472,7 @@ class StatusMonitorIndicator extends PanelMenu.Button {
             [show('show-gpu-power') && gpu ? formatWatts(gpu.power) : null],
         ], style);
 
-        const diskTemps = disk.temps.map(drive => drive.temp).filter(temp => temp !== null);
+        const diskTemps = driveTemps.filter(temp => temp !== null);
         // The hottest drive is the one worth watching in the panel.
         const diskTemp = diskTemps.length > 0 ? Math.max(...diskTemps) : null;
         const diskIo = disk.io ? disk.io.read + disk.io.write : null;
@@ -1305,6 +1500,7 @@ class StatusMonitorIndicator extends PanelMenu.Button {
 
     destroy() {
         this._destroyed = true;
+        this._gpu.stop();
 
         if (this._timeoutId) {
             GLib.Source.remove(this._timeoutId);

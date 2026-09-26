@@ -14,6 +14,7 @@ Developed on GNOME Shell 48 (Wayland) with an Intel CPU and an NVIDIA GPU.
 - Panel: one group of values per device, in CPU, memory, GPU, storage order, for
   example `CPU 12% 38°C 21 W`. Every value can be shown or hidden independently.
   Each value keeps a fixed width, so the top bar does not shift as numbers change.
+  A reading past the usual range, such as 100°C, widens its slot once and keeps it.
 - Colors: each value turns yellow and red at its own warning and critical
   thresholds, in the panel and the menu, switched on one by one in the Colors
   page of the preferences. Temperatures are colored by default, usage is not.
@@ -149,12 +150,18 @@ coloring on, `X-warn` and `X-crit` set where the value turns yellow and red:
 | Disk used space | `statvfs` of the configured mount point |
 | Disk temperature | `hwmon` `nvme` Composite sensor, or `drivetemp` for SATA |
 | Disk activity | `/proc/diskstats` sector counters |
-| GPU, NVIDIA | `nvidia-smi --query-gpu` |
+| GPU, NVIDIA | `nvidia-smi --query-gpu --loop`, one process kept running |
 | GPU, other | `/sys/class/drm/cardN` and its `hwmon` chip |
 | GPU model name | `/usr/share/hwdata/pci.ids`, or `/usr/share/misc/pci.ids` |
 
-Everything except NVIDIA cards is read directly from the kernel, so only they
-spawn a process.
+Everything except NVIDIA cards is read directly from the kernel. NVIDIA cards
+are read from a single `nvidia-smi` started in loop mode, which prints a sample
+every refresh interval: starting one per refresh would fork the whole shell and
+load the driver library each time. The GPU and the drive temperatures are only
+read while the panel or the open menu shows them, and `nvidia-smi` is stopped
+otherwise. Drive temperatures and disk space are read off the main thread, so a
+drive leaving its power saving state or a stalled network mount never blocks
+the shell.
 
 ## Icons
 
@@ -182,6 +189,12 @@ code.
 Errors go to the shell log:
 
     journalctl -f -o cat /usr/bin/gnome-shell
+
+## Release
+
+Bump `version` and `version-name` in `metadata.json` and push to `main`: the
+Release workflow builds the zip and publishes it as release `v<version-name>`,
+creating the tag. Other changes to `metadata.json` only build the zip.
 
 ## License
 

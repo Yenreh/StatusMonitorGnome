@@ -1,13 +1,23 @@
 name: Release
 
+# metadata.json drives releases: a push to main that changes it builds the
+# zip, and publishes it as release v<version-name> when that version has no
+# release yet. Bumping version and version-name is all a release takes.
 on:
   push:
-    tags:
-      - 'v*'
+    branches:
+      - main
+    paths:
+      - metadata.json
   workflow_dispatch:
 
 permissions:
   contents: write
+
+# One run at a time, so two quick pushes cannot publish the same version twice.
+concurrency:
+  group: release
+  cancel-in-progress: false
 
 jobs:
   release:
@@ -27,13 +37,18 @@ jobs:
           echo "name=$(python3 -c "import json;print(json.load(open('metadata.json'))['name'])")" >> "$GITHUB_OUTPUT"
           echo "version=$(python3 -c "import json;print(json.load(open('metadata.json'))['version-name'])")" >> "$GITHUB_OUTPUT"
 
-      - name: Check the tag matches metadata.json
-        if: startsWith(github.ref, 'refs/tags/')
+      - name: Check whether this version is already released
+        id: released
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          tag="${GITHUB_REF_NAME#v}"
-          if [ "$tag" != "${{ steps.meta.outputs.version }}" ]; then
-            echo "Tag $GITHUB_REF_NAME does not match version-name ${{ steps.meta.outputs.version }}" >&2
-            exit 1
+          # A change that keeps the version, a new shell-version for example,
+          # is built but not published again.
+          if gh release view "v${{ steps.meta.outputs.version }}" >/dev/null 2>&1; then
+            echo "v${{ steps.meta.outputs.version }} is already released, building only"
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
           fi
 
       - name: Check JavaScript syntax
@@ -57,7 +72,7 @@ jobs:
           path: ${{ steps.meta.outputs.uuid }}.shell-extension.zip
 
       - name: Publish the release
-        if: startsWith(github.ref, 'refs/tags/')
+        if: steps.released.outputs.exists == 'false'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -70,7 +85,9 @@ jobs:
             "" \
             "    gnome-extensions enable ${{ steps.meta.outputs.uuid }}" \
             > notes.md
-          gh release create "$GITHUB_REF_NAME" \
+          # The tag is created on the commit that was built.
+          gh release create "v${{ steps.meta.outputs.version }}" \
             "${{ steps.meta.outputs.uuid }}.shell-extension.zip" \
+            --target "$GITHUB_SHA" \
             --title "${{ steps.meta.outputs.name }} ${{ steps.meta.outputs.version }}" \
             --notes-file notes.md
