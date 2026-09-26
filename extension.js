@@ -1326,12 +1326,29 @@ class StatusMonitorIndicator extends PanelMenu.Button {
 
 export default class StatusMonitorGnomeExtension extends Extension {
     enable() {
-        this._indicator = new StatusMonitorIndicator(this);
-        Main.panel.addToStatusArea(this.uuid, this._indicator);
+        this._settings = this.getSettings();
+        this._settingsChangedId = this._settings.connect('changed', (_s, key) => {
+            if (key === 'panel-box' || key === 'panel-position')
+                this._addIndicator();
+        });
+        this._addIndicator();
     }
 
     disable() {
+        this._settings.disconnect(this._settingsChangedId);
+        this._settings = null;
         this._indicator?.destroy();
         this._indicator = null;
+    }
+
+    // Placed with an explicit position, so its order next to other indicators
+    // does not depend on which extension is enabled first. A move rebuilds the
+    // indicator, since the panel only places it when it is added.
+    _addIndicator() {
+        this._indicator?.destroy();
+        this._indicator = new StatusMonitorIndicator(this);
+        Main.panel.addToStatusArea(this.uuid, this._indicator,
+            this._settings.get_int('panel-position'),
+            this._settings.get_string('panel-box'));
     }
 }

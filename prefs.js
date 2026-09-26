@@ -72,6 +72,7 @@ function gpuDescription() {
 
 const PREFIX_STYLES = ['icon', 'text', 'none'];
 const VRAM_UNITS = ['gib', 'percent'];
+const PANEL_BOXES = ['left', 'center', 'right'];
 
 function bindCombo(settings, key, row, values) {
     row.selected = Math.max(0, values.indexOf(settings.get_string(key)));
@@ -81,6 +82,30 @@ function bindCombo(settings, key, row, values) {
         if (index >= 0 && index !== row.selected)
             row.selected = index;
     });
+}
+
+// Where the indicator sits in the top bar.
+function addPlacementGroup(settings, page) {
+    const group = new Adw.PreferencesGroup({
+        title: _('Position'),
+        description: _('Where the indicator sits in the top bar'),
+    });
+    page.add(group);
+
+    const boxRow = new Adw.ComboRow({
+        title: _('Area'),
+        model: new Gtk.StringList({strings: [_('Left'), _('Center'), _('Right')]}),
+    });
+    bindCombo(settings, 'panel-box', boxRow, PANEL_BOXES);
+    group.add(boxRow);
+
+    const positionRow = new Adw.SpinRow({
+        title: _('Order'),
+        subtitle: _('Lower numbers go further left within the area'),
+        adjustment: new Gtk.Adjustment({lower: 0, upper: 20, step_increment: 1}),
+    });
+    settings.bind('panel-position', positionRow, 'value', Gio.SettingsBindFlags.DEFAULT);
+    group.add(positionRow);
 }
 
 // Rows go into a preferences group or nested in an expander row.
@@ -208,6 +233,8 @@ export default class StatusMonitorGnomePreferences extends ExtensionPreferences 
         settings.bind('refresh-interval', intervalRow, 'value',
             Gio.SettingsBindFlags.DEFAULT);
         general.add(intervalRow);
+
+        addPlacementGroup(settings, page);
 
         this._fillColorsPage(window, settings);
     }

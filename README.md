@@ -107,6 +107,8 @@ exposure is small, but it is not zero. Decide accordingly.
 | --- | --- | --- |
 | `refresh-interval` | `2` | Seconds between sensor readings |
 | `prefix-style` | `icon` | Group marker: `icon`, `text` or `none` |
+| `panel-box` | `right` | Top bar area: `left`, `center` or `right` |
+| `panel-position` | `1` | Order within the area, lower goes further left |
 | `show-cpu-usage` | `true` | CPU usage in the panel |
 | `show-cpu-temp` | `true` | CPU package temperature in the panel |
 | `show-cpu-power` | `true` | CPU package watts in the panel |
