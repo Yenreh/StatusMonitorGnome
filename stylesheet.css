@@ -25,6 +25,15 @@
     font-size: 0.9em;
 }
 
+/* Values past a threshold, in the panel and the menu. */
+.sm-level-warn {
+    color: #f8e45c;
+}
+
+.sm-level-crit {
+    color: #ff7b63;
+}
+
 /* Menu */
 
 .sm-row {

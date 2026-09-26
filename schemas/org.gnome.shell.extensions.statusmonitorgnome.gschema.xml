@@ -67,7 +67,17 @@
     <key name="show-gpu-vram" type="b">
       <default>false</default>
       <summary>Show GPU memory</summary>
-      <description>Show the used video memory in GiB in the panel, when the driver reports it.</description>
+      <description>Show the used video memory in the panel, when the driver reports it.</description>
+    </key>
+
+    <key name="gpu-vram-unit" type="s">
+      <choices>
+        <choice value="gib"/>
+        <choice value="percent"/>
+      </choices>
+      <default>"gib"</default>
+      <summary>GPU memory unit</summary>
+      <description>Show the used video memory in the panel in GiB or as a percentage of the total.</description>
     </key>
 
     <key name="show-gpu-temp" type="b">
@@ -91,6 +101,166 @@
       <default>"icon"</default>
       <summary>Device marker</summary>
       <description>What identifies each group of panel values: the device icon, a text prefix such as CPU or RAM, or nothing.</description>
+    </key>
+
+    <key name="color-cpu-usage" type="b">
+      <default>false</default>
+      <summary>Color CPU usage</summary>
+      <description>Color the CPU usage, in the panel and the menu, once it reaches its warning or critical threshold.</description>
+    </key>
+
+    <key name="cpu-usage-warn" type="i">
+      <range min="1" max="100"/>
+      <default>75</default>
+      <summary>Warning CPU usage</summary>
+      <description>The CPU usage, in percent, shown as a warning.</description>
+    </key>
+
+    <key name="cpu-usage-crit" type="i">
+      <range min="1" max="100"/>
+      <default>90</default>
+      <summary>Critical CPU usage</summary>
+      <description>The CPU usage, in percent, shown as critical.</description>
+    </key>
+
+    <key name="color-cpu-temp" type="b">
+      <default>true</default>
+      <summary>Color CPU temperature</summary>
+      <description>Color the CPU temperature, in the panel and the menu, once it reaches its warning or critical threshold.</description>
+    </key>
+
+    <key name="cpu-temp-warn" type="i">
+      <range min="20" max="120"/>
+      <default>80</default>
+      <summary>Warning CPU temperature</summary>
+      <description>The CPU temperature, in degrees Celsius, shown as a warning.</description>
+    </key>
+
+    <key name="cpu-temp-crit" type="i">
+      <range min="20" max="120"/>
+      <default>90</default>
+      <summary>Critical CPU temperature</summary>
+      <description>The CPU temperature, in degrees Celsius, shown as critical.</description>
+    </key>
+
+    <key name="color-memory-usage" type="b">
+      <default>false</default>
+      <summary>Color memory usage</summary>
+      <description>Color the memory usage, in the panel and the menu, once it reaches its warning or critical threshold.</description>
+    </key>
+
+    <key name="memory-usage-warn" type="i">
+      <range min="1" max="100"/>
+      <default>75</default>
+      <summary>Warning memory usage</summary>
+      <description>The memory usage, in percent, shown as a warning.</description>
+    </key>
+
+    <key name="memory-usage-crit" type="i">
+      <range min="1" max="100"/>
+      <default>90</default>
+      <summary>Critical memory usage</summary>
+      <description>The memory usage, in percent, shown as critical.</description>
+    </key>
+
+    <key name="color-gpu-usage" type="b">
+      <default>false</default>
+      <summary>Color GPU usage</summary>
+      <description>Color the GPU usage, in the panel and the menu, once it reaches its warning or critical threshold.</description>
+    </key>
+
+    <key name="gpu-usage-warn" type="i">
+      <range min="1" max="100"/>
+      <default>75</default>
+      <summary>Warning GPU usage</summary>
+      <description>The GPU usage, in percent, shown as a warning.</description>
+    </key>
+
+    <key name="gpu-usage-crit" type="i">
+      <range min="1" max="100"/>
+      <default>90</default>
+      <summary>Critical GPU usage</summary>
+      <description>The GPU usage, in percent, shown as critical.</description>
+    </key>
+
+    <key name="color-gpu-vram" type="b">
+      <default>false</default>
+      <summary>Color GPU memory</summary>
+      <description>Color the GPU memory, in the panel and the menu, once it reaches its warning or critical threshold.</description>
+    </key>
+
+    <key name="gpu-vram-warn" type="i">
+      <range min="1" max="100"/>
+      <default>75</default>
+      <summary>Warning GPU memory</summary>
+      <description>The GPU memory, in percent of the total, shown as a warning.</description>
+    </key>
+
+    <key name="gpu-vram-crit" type="i">
+      <range min="1" max="100"/>
+      <default>90</default>
+      <summary>Critical GPU memory</summary>
+      <description>The GPU memory, in percent of the total, shown as critical.</description>
+    </key>
+
+    <key name="color-gpu-temp" type="b">
+      <default>true</default>
+      <summary>Color GPU temperature</summary>
+      <description>Color the GPU temperature, in the panel and the menu, once it reaches its warning or critical threshold.</description>
+    </key>
+
+    <key name="gpu-temp-warn" type="i">
+      <range min="20" max="120"/>
+      <default>80</default>
+      <summary>Warning GPU temperature</summary>
+      <description>The GPU temperature, in degrees Celsius, shown as a warning.</description>
+    </key>
+
+    <key name="gpu-temp-crit" type="i">
+      <range min="20" max="120"/>
+      <default>90</default>
+      <summary>Critical GPU temperature</summary>
+      <description>The GPU temperature, in degrees Celsius, shown as critical.</description>
+    </key>
+
+    <key name="color-disk-usage" type="b">
+      <default>false</default>
+      <summary>Color disk usage</summary>
+      <description>Color the disk usage, in the panel and the menu, once it reaches its warning or critical threshold.</description>
+    </key>
+
+    <key name="disk-usage-warn" type="i">
+      <range min="1" max="100"/>
+      <default>80</default>
+      <summary>Warning disk usage</summary>
+      <description>The disk usage, in percent, shown as a warning.</description>
+    </key>
+
+    <key name="disk-usage-crit" type="i">
+      <range min="1" max="100"/>
+      <default>95</default>
+      <summary>Critical disk usage</summary>
+      <description>The disk usage, in percent, shown as critical.</description>
+    </key>
+
+    <key name="color-disk-temp" type="b">
+      <default>true</default>
+      <summary>Color drive temperature</summary>
+      <description>Color the drive temperature, in the panel and the menu, once it reaches its warning or critical threshold.</description>
+    </key>
+
+    <key name="disk-temp-warn" type="i">
+      <range min="20" max="120"/>
+      <default>55</default>
+      <summary>Warning drive temperature</summary>
+      <description>The drive temperature, in degrees Celsius, shown as a warning.</description>
+    </key>
+
+    <key name="disk-temp-crit" type="i">
+      <range min="20" max="120"/>
+      <default>65</default>
+      <summary>Critical drive temperature</summary>
+      <description>The drive temperature, in degrees Celsius, shown as critical.</description>
     </key>
 
   </schema>

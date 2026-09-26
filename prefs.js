@@ -71,6 +71,7 @@ function gpuDescription() {
 }
 
 const PREFIX_STYLES = ['icon', 'text', 'none'];
+const VRAM_UNITS = ['gib', 'percent'];
 
 function bindCombo(settings, key, row, values) {
     row.selected = Math.max(0, values.indexOf(settings.get_string(key)));
@@ -82,20 +83,57 @@ function bindCombo(settings, key, row, values) {
     });
 }
 
+// Rows go into a preferences group or nested in an expander row.
+function append(parent, row) {
+    if (parent instanceof Adw.ExpanderRow)
+        parent.add_row(row);
+    else
+        parent.add(row);
+}
+
 // GTK rejects an undefined subtitle in the initializer, so it is only set
 // for the rows that actually carry one.
 function addSwitch(settings, group, key, title, subtitle = '') {
     const row = new Adw.SwitchRow({title, subtitle});
     settings.bind(key, row, 'active', Gio.SettingsBindFlags.DEFAULT);
-    group.add(row);
+    append(group, row);
     return row;
+}
+
+function addSpin(settings, parent, key, title, lower, upper) {
+    const row = new Adw.SpinRow({
+        title,
+        adjustment: new Gtk.Adjustment({
+            lower,
+            upper,
+            step_increment: 1,
+            page_increment: 5,
+        }),
+    });
+    settings.bind(key, row, 'value', Gio.SettingsBindFlags.DEFAULT);
+    append(parent, row);
+    return row;
+}
+
+// One colored value: the switch turns coloring on and unlocks its own
+// warning and critical thresholds, nested below it.
+function addColor(settings, group, metric, title, unit, lower, upper) {
+    const row = new Adw.ExpanderRow({title, show_enable_switch: true});
+    settings.bind(`color-${metric}`, row, 'enable-expansion', Gio.SettingsBindFlags.DEFAULT);
+    group.add(row);
+
+    addSpin(settings, row, `${metric}-warn`, `${_('Warning at')} (${unit})`, lower, upper);
+    addSpin(settings, row, `${metric}-crit`, `${_('Critical at')} (${unit})`, lower, upper);
 }
 
 export default class StatusMonitorGnomePreferences extends ExtensionPreferences {
     fillPreferencesWindow(window) {
         const settings = this.getSettings();
 
-        const page = new Adw.PreferencesPage();
+        const page = new Adw.PreferencesPage({
+            title: _('Panel'),
+            icon_name: 'preferences-system-symbolic',
+        });
         window.add(page);
 
         const cpu = new Adw.PreferencesGroup({
@@ -136,8 +174,14 @@ export default class StatusMonitorGnomePreferences extends ExtensionPreferences 
         });
         page.add(gpu);
         addSwitch(settings, gpu, 'show-gpu-usage', _('Usage'));
-        addSwitch(settings, gpu, 'show-gpu-vram', _('Video memory'),
-            _('Used VRAM in GiB'));
+        addSwitch(settings, gpu, 'show-gpu-vram', _('Video memory'), _('Used VRAM'));
+        const vramUnitRow = new Adw.ComboRow({
+            title: _('Video memory unit'),
+            model: new Gtk.StringList({strings: [_('GiB'), _('Percentage')]}),
+        });
+        bindCombo(settings, 'gpu-vram-unit', vramUnitRow, VRAM_UNITS);
+        settings.bind('show-gpu-vram', vramUnitRow, 'sensitive', Gio.SettingsBindFlags.GET);
+        gpu.add(vramUnitRow);
         addSwitch(settings, gpu, 'show-gpu-temp', _('Temperature'));
         addSwitch(settings, gpu, 'show-gpu-power', _('Power'));
 
@@ -164,5 +208,40 @@ export default class StatusMonitorGnomePreferences extends ExtensionPreferences 
         settings.bind('refresh-interval', intervalRow, 'value',
             Gio.SettingsBindFlags.DEFAULT);
         general.add(intervalRow);
+
+        this._fillColorsPage(window, settings);
+    }
+
+    _fillColorsPage(window, settings) {
+        const page = new Adw.PreferencesPage({
+            title: _('Colors'),
+            icon_name: 'color-select-symbolic',
+            description: _('Each value turns yellow at its warning threshold and red at ' +
+                'its critical one, in the panel and the menu'),
+        });
+        window.add(page);
+
+        const cpu = new Adw.PreferencesGroup({title: _('CPU')});
+        page.add(cpu);
+        addColor(settings, cpu, 'cpu-usage', _('Usage'), '%', 1, 100);
+        addColor(settings, cpu, 'cpu-temp', _('Temperature'), '°C', 20, 120);
+
+        const memory = new Adw.PreferencesGroup({
+            title: _('Memory'),
+            description: _('Swap follows the same thresholds'),
+        });
+        page.add(memory);
+        addColor(settings, memory, 'memory-usage', _('Usage'), '%', 1, 100);
+
+        const gpu = new Adw.PreferencesGroup({title: _('GPU')});
+        page.add(gpu);
+        addColor(settings, gpu, 'gpu-usage', _('Usage'), '%', 1, 100);
+        addColor(settings, gpu, 'gpu-vram', _('Video memory'), '%', 1, 100);
+        addColor(settings, gpu, 'gpu-temp', _('Temperature'), '°C', 20, 120);
+
+        const disk = new Adw.PreferencesGroup({title: _('Storage')});
+        page.add(disk);
+        addColor(settings, disk, 'disk-usage', _('Used space'), '%', 1, 100);
+        addColor(settings, disk, 'disk-temp', _('Temperature'), '°C', 20, 120);
     }
 }

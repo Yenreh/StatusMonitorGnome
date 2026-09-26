@@ -13,9 +13,13 @@ Developed on GNOME Shell 48 (Wayland) with an Intel CPU and an NVIDIA GPU.
 
 - Panel: one group of values per device, in CPU, memory, GPU, storage order, for
   example `CPU 12% 38°C 21 W`. Every value can be shown or hidden independently.
+  Each value keeps a fixed width, so the top bar does not shift as numbers change.
+- Colors: each value turns yellow and red at its own warning and critical
+  thresholds, in the panel and the menu, switched on one by one in the Colors
+  page of the preferences. Temperatures are colored by default, usage is not.
 - Menu: usage, temperature, power and frequency per device, memory and swap in
   GiB, VRAM per GPU, and used space, throughput and per drive temperature for
-  storage, with level bars that turn yellow at 75% and red at 90%.
+  storage, with level bars that follow the color thresholds of their value.
 - Each group is marked with its device icon, a text prefix (`CPU`, `RAM`,
   `DISK`, `GPU`) or nothing, as configured.
 - The monitored filesystem is configurable, `/` by default. The panel shows the
@@ -112,9 +116,24 @@ exposure is small, but it is not zero. Decide accordingly.
 | `show-disk-io` | `false` | Combined read and write throughput |
 | `disk-mount` | `/` | Filesystem whose used space is reported |
 | `show-gpu-usage` | `true` | GPU usage in the panel |
-| `show-gpu-vram` | `false` | Used video memory in GiB in the panel |
+| `show-gpu-vram` | `false` | Used video memory in the panel |
+| `gpu-vram-unit` | `gib` | Video memory in the panel: `gib` or `percent` |
 | `show-gpu-temp` | `true` | GPU temperature in the panel |
 | `show-gpu-power` | `true` | GPU watts in the panel |
+
+Colors, one switch and one pair of thresholds per value. `color-X` turns
+coloring on, `X-warn` and `X-crit` set where the value turns yellow and red:
+
+| Value `X` | Colored by default | Warning, critical |
+| --- | --- | --- |
+| `cpu-usage` | no | 75%, 90% |
+| `cpu-temp` | yes | 80°C, 90°C |
+| `memory-usage` (swap too) | no | 75%, 90% |
+| `gpu-usage` | no | 75%, 90% |
+| `gpu-vram` | no | 75%, 90% of the total |
+| `gpu-temp` | yes | 80°C, 90°C |
+| `disk-usage` | no | 80%, 95% |
+| `disk-temp` | yes | 55°C, 65°C |
 
 ## Sources
 

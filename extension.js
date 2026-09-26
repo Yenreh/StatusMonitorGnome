@@ -12,9 +12,13 @@ import {Extension, gettext as _} from 'resource:///org/gnome/shell/extensions/ex
 // Must match the track width in stylesheet.css, the fill is sized in pixels.
 const BAR_WIDTH = 90;
 
-// Fractions where a bar turns yellow and red.
-const WARN_LEVEL = 0.75;
-const CRIT_LEVEL = 0.90;
+// Widest text each kind of panel value takes in normal use. Digits are
+// tabular, so any digit stands for all of them.
+const WIDTH_PERCENT = '100%';
+const WIDTH_TEMP = '00°C';
+const WIDTH_WATTS = '000 W';
+const WIDTH_GIB = '00.0 GiB';
+const WIDTH_RATE = '000.0 MiB/s';
 
 const KIB = 1024;
 const MIB = 1024 * 1024;
@@ -236,6 +240,18 @@ function formatMHz(mhz) {
     if (mhz === null)
         return null;
     return mhz >= 1000 ? `${(mhz / 1000).toFixed(2)} GHz` : `${Math.round(mhz)} MHz`;
+}
+
+// 'warn' or 'crit' once a reading reaches its threshold, null below it or
+// when there is no reading.
+function levelOf(value, warn, crit) {
+    if (value === null || value === undefined)
+        return null;
+    if (value >= crit)
+        return 'crit';
+    if (value >= warn)
+        return 'warn';
+    return null;
 }
 
 // Reads /proc and sysfs directly: the files are small and the values are
@@ -845,20 +861,15 @@ class LevelBar extends St.BoxLayout {
         this.add_child(this._fill);
     }
 
-    setValue(fraction) {
+    setValue(fraction, level = null) {
         const value = Math.min(1, Math.max(0, fraction ?? 0));
         this._fill.style = `width: ${Math.round(BAR_WIDTH * value)}px;`;
-
-        let level = '';
-        if (value >= CRIT_LEVEL)
-            level = ' sm-bar-crit';
-        else if (value >= WARN_LEVEL)
-            level = ' sm-bar-warn';
-        this._fill.style_class = `sm-bar-fill${level}`;
+        this._fill.style_class = level ? `sm-bar-fill sm-bar-${level}` : 'sm-bar-fill';
     }
 });
 
 // A read only row: title on the left, optional bar, value on the right.
+// Rows with a bar show the warning level on the bar, the others on the value.
 const MetricRow = GObject.registerClass(
 class MetricRow extends PopupMenu.PopupBaseMenuItem {
     _init(title, withBar = false) {
@@ -893,20 +904,62 @@ class MetricRow extends PopupMenu.PopupBaseMenuItem {
     }
 
     // A null value hides the row, so unsupported sensors leave no empty line.
-    update(text, fraction = null) {
+    update(text, fraction = null, level = null) {
         this.visible = text !== null;
         if (text === null)
             return;
 
         this._value.text = text;
-        this._bar?.setValue(fraction);
+        if (this._bar)
+            this._bar.setValue(fraction, level);
+        else
+            this._value.style_class = level ? `sm-row-value sm-level-${level}` : 'sm-row-value';
+    }
+});
+
+// One value in the panel. An invisible copy of the widest text it takes sits
+// behind it, so the slot keeps its width while the number changes and the
+// rest of the top bar does not move.
+const PanelValue = GObject.registerClass(
+class PanelValue extends St.Widget {
+    _init(widest) {
+        super._init({
+            layout_manager: new Clutter.BinLayout(),
+            y_align: Clutter.ActorAlign.CENTER,
+        });
+
+        this._widest = new St.Label({
+            text: widest,
+            style_class: 'sm-chip-value',
+            opacity: 0,
+            y_align: Clutter.ActorAlign.CENTER,
+        });
+        this.add_child(this._widest);
+        this._label = new St.Label({
+            style_class: 'sm-chip-value',
+            x_align: Clutter.ActorAlign.END,
+            y_align: Clutter.ActorAlign.CENTER,
+        });
+        this.add_child(this._label);
+    }
+
+    // widest replaces the reserved width, for values whose unit is a setting.
+    update(text, level = null, widest = null) {
+        this.visible = text !== null;
+        if (text === null)
+            return;
+
+        if (widest !== null)
+            this._widest.text = widest;
+        this._label.text = text;
+        this._label.style_class = level ? `sm-chip-value sm-level-${level}` : 'sm-chip-value';
     }
 });
 
 // One group of values in the panel, for example "CPU 12% 38 C 21 W".
 const PanelChip = GObject.registerClass(
 class PanelChip extends St.BoxLayout {
-    _init(prefix, gicon) {
+    _init(prefix, gicon, widths) {
         super._init({
             style_class: 'sm-chip',
             y_align: Clutter.ActorAlign.CENTER,
@@ -923,21 +976,24 @@ class PanelChip extends St.BoxLayout {
             style_class: 'sm-chip-prefix',
             y_align: Clutter.ActorAlign.CENTER,
         });
-        this._value = new St.Label({
-            style_class: 'sm-chip-value',
-            y_align: Clutter.ActorAlign.CENTER,
-        });
         this.add_child(this._icon);
         this.add_child(this._prefix);
-        this.add_child(this._value);
+
+        this._values = widths.map(widest => {
+            const value = new PanelValue(widest);
+            this.add_child(value);
+            return value;
+        });
     }
 
+    // One [text, level, widest] entry per value, in constructor order, the
+    // last two optional; a null text hides that value.
     update(parts, style) {
-        const values = parts.filter(part => part !== null);
-        this.visible = values.length > 0;
+        parts.forEach(([text, level, widest], i) =>
+            this._values[i].update(text, level ?? null, widest ?? null));
+        this.visible = this._values.some(value => value.visible);
         this._icon.visible = style === 'icon';
         this._prefix.visible = style === 'text';
-        this._value.text = values.join(' ');
     }
 });
 
@@ -994,10 +1050,14 @@ class StatusMonitorIndicator extends PanelMenu.Button {
         });
         box.add_child(this._icon);
 
-        this._cpuChip = new PanelChip(_('CPU'), this._icons.cpu);
-        this._memoryChip = new PanelChip(_('RAM'), this._icons.memory);
-        this._diskChip = new PanelChip(_('DISK'), this._icons.ssd);
-        this._gpuChip = new PanelChip(_('GPU'), this._icons.gpu);
+        this._cpuChip = new PanelChip(_('CPU'), this._icons.cpu,
+            [WIDTH_PERCENT, WIDTH_TEMP, WIDTH_WATTS]);
+        this._memoryChip = new PanelChip(_('RAM'), this._icons.memory,
+            [WIDTH_PERCENT]);
+        this._diskChip = new PanelChip(_('DISK'), this._icons.ssd,
+            [WIDTH_PERCENT, WIDTH_TEMP, WIDTH_RATE]);
+        this._gpuChip = new PanelChip(_('GPU'), this._icons.gpu,
+            [WIDTH_PERCENT, WIDTH_GIB, WIDTH_TEMP, WIDTH_WATTS]);
         box.add_child(this._cpuChip);
         box.add_child(this._memoryChip);
         box.add_child(this._gpuChip);
@@ -1117,18 +1177,37 @@ class StatusMonitorIndicator extends PanelMenu.Button {
         }
     }
 
+    // Level of a value against its own thresholds, for example cpu-temp or
+    // gpu-vram. Null when coloring is off for that value.
+    _level(metric, value) {
+        if (!this._settings.get_boolean(`color-${metric}`))
+            return null;
+        return levelOf(value,
+            this._settings.get_int(`${metric}-warn`),
+            this._settings.get_int(`${metric}-crit`));
+    }
+
+    // Usage thresholds are percentages, the readings fractions.
+    _usageLevel(metric, fraction) {
+        return this._level(metric, fraction === null ? null : fraction * 100);
+    }
+
     _renderMenu(cpu, memory, disk, gpus) {
-        this._cpuUsageRow.update(formatPercent(cpu.usage), cpu.usage);
-        this._cpuTempRow.update(formatTemp(cpu.temp));
+        this._cpuUsageRow.update(formatPercent(cpu.usage), cpu.usage,
+            this._usageLevel('cpu-usage', cpu.usage));
+        this._cpuTempRow.update(formatTemp(cpu.temp), null,
+            this._level('cpu-temp', cpu.temp));
         this._cpuPowerRow.update(formatWatts(cpu.power));
         this._cpuFreqRow.update(formatMHz(cpu.freq));
 
         if (memory) {
             this._memoryUsageRow.update(
-                `${formatGiB(memory.used)} / ${formatGiB(memory.total)}`, memory.usage);
+                `${formatGiB(memory.used)} / ${formatGiB(memory.total)}`, memory.usage,
+                this._usageLevel('memory-usage', memory.usage));
             this._swapRow.update(memory.swapTotal > 0
                 ? `${formatGiB(memory.swapUsed)} / ${formatGiB(memory.swapTotal)}`
-                : null, memory.swapUsage);
+                : null, memory.swapUsage,
+                this._usageLevel('memory-usage', memory.swapUsage));
         } else {
             this._memoryUsageRow.update(null);
             this._swapRow.update(null);
@@ -1138,10 +1217,12 @@ class StatusMonitorIndicator extends PanelMenu.Button {
         this._diskUsageRow.setTitle(this._settings.get_string('disk-mount'));
         this._diskUsageRow.update(disk.space
             ? `${formatGiB(disk.space.used)} / ${formatGiB(disk.space.total)}`
-            : null, disk.space?.usage);
+            : null, disk.space?.usage,
+            this._usageLevel('disk-usage', disk.space?.usage ?? null));
         this._diskReadRow.update(formatRate(disk.io?.read ?? null));
         this._diskWriteRow.update(formatRate(disk.io?.write ?? null));
-        disk.temps.forEach((drive, i) => this._diskTempRows[i].update(formatTemp(drive.temp)));
+        disk.temps.forEach((drive, i) => this._diskTempRows[i].update(
+            formatTemp(drive.temp), null, this._level('disk-temp', drive.temp)));
 
         if (gpus.length !== this._gpuRows.length)
             this._buildGpuRows(gpus.length);
@@ -1149,11 +1230,12 @@ class StatusMonitorIndicator extends PanelMenu.Button {
         gpus.forEach((gpu, i) => {
             const rows = this._gpuRows[i];
             this._gpuSeparators[i].label.text = gpu.name;
-            rows.usage.update(formatPercent(gpu.usage), gpu.usage);
+            rows.usage.update(formatPercent(gpu.usage), gpu.usage,
+                this._usageLevel('gpu-usage', gpu.usage));
             rows.memory.update(gpu.memoryTotal
                 ? `${formatGiB(gpu.memoryUsed)} / ${formatGiB(gpu.memoryTotal)}`
-                : null, gpu.memoryUsage);
-            rows.temp.update(formatTemp(gpu.temp));
+                : null, gpu.memoryUsage, this._usageLevel('gpu-vram', gpu.memoryUsage));
+            rows.temp.update(formatTemp(gpu.temp), null, this._level('gpu-temp', gpu.temp));
             rows.power.update(gpu.powerLimit
                 ? `${formatWatts(gpu.power)} / ${formatWatts(gpu.powerLimit)}`
                 : formatWatts(gpu.power));
@@ -1165,33 +1247,46 @@ class StatusMonitorIndicator extends PanelMenu.Button {
         const show = key => this._settings.get_boolean(key);
         const style = this._settings.get_string('prefix-style');
 
+        // VRAM in GiB by default, so it does not read as a second percentage.
+        const vramPercent = this._settings.get_string('gpu-vram-unit') === 'percent';
+        let vram = null;
+        if (gpu?.memoryUsed != null)
+            vram = vramPercent ? formatPercent(gpu.memoryUsage) : formatGiB(gpu.memoryUsed);
+
         this._cpuChip.update([
-            show('show-cpu-usage') ? formatPercent(cpu.usage) : null,
-            show('show-cpu-temp') ? formatTemp(cpu.temp) : null,
-            show('show-cpu-power') ? formatWatts(cpu.power) : null,
+            [show('show-cpu-usage') ? formatPercent(cpu.usage) : null,
+                this._usageLevel('cpu-usage', cpu.usage)],
+            [show('show-cpu-temp') ? formatTemp(cpu.temp) : null,
+                this._level('cpu-temp', cpu.temp)],
+            [show('show-cpu-power') ? formatWatts(cpu.power) : null],
         ], style);
 
         this._memoryChip.update([
-            show('show-memory-usage') && memory ? formatPercent(memory.usage) : null,
+            [show('show-memory-usage') && memory ? formatPercent(memory.usage) : null,
+                this._usageLevel('memory-usage', memory?.usage ?? null)],
         ], style);
 
         this._gpuChip.update([
-            show('show-gpu-usage') && gpu ? formatPercent(gpu.usage) : null,
-            // VRAM in GiB, so it does not read as a second percentage.
-            show('show-gpu-vram') && gpu?.memoryUsed !== null && gpu !== null
-                ? formatGiB(gpu.memoryUsed) : null,
-            show('show-gpu-temp') && gpu ? formatTemp(gpu.temp) : null,
-            show('show-gpu-power') && gpu ? formatWatts(gpu.power) : null,
+            [show('show-gpu-usage') && gpu ? formatPercent(gpu.usage) : null,
+                this._usageLevel('gpu-usage', gpu?.usage ?? null)],
+            [show('show-gpu-vram') ? vram : null,
+                this._usageLevel('gpu-vram', gpu?.memoryUsage ?? null),
+                vramPercent ? WIDTH_PERCENT : WIDTH_GIB],
+            [show('show-gpu-temp') && gpu ? formatTemp(gpu.temp) : null,
+                this._level('gpu-temp', gpu?.temp ?? null)],
+            [show('show-gpu-power') && gpu ? formatWatts(gpu.power) : null],
         ], style);
 
         const diskTemps = disk.temps.map(drive => drive.temp).filter(temp => temp !== null);
+        // The hottest drive is the one worth watching in the panel.
+        const diskTemp = diskTemps.length > 0 ? Math.max(...diskTemps) : null;
         const diskIo = disk.io ? disk.io.read + disk.io.write : null;
         this._diskChip.update([
-            show('show-disk-usage') && disk.space ? formatPercent(disk.space.usage) : null,
-            // The hottest drive is the one worth watching in the panel.
-            show('show-disk-temp') && diskTemps.length > 0
-                ? formatTemp(Math.max(...diskTemps)) : null,
-            show('show-disk-io') ? formatRate(diskIo) : null,
+            [show('show-disk-usage') && disk.space ? formatPercent(disk.space.usage) : null,
+                this._usageLevel('disk-usage', disk.space?.usage ?? null)],
+            [show('show-disk-temp') ? formatTemp(diskTemp) : null,
+                this._level('disk-temp', diskTemp)],
+            [show('show-disk-io') ? formatRate(diskIo) : null],
         ], style);
 
         this._icon.visible = !this._cpuChip.visible && !this._memoryChip.visible &&
